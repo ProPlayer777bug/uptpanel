@@ -40,11 +40,14 @@ import platform
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 import urllib.request
 import urllib.error
 
 APP_NAME = "uptimehost"
+
+REPO_URL = "https://github.com/ProPlayer777bug/uptpanel.git"
 
 REPO_DIR = os.environ.get("UH_REPO_DIR") or os.path.dirname(os.path.abspath(__file__))
 API_URL = os.environ.get("UH_API_URL", "http://localhost:8081")
@@ -425,11 +428,28 @@ def login_panel(base, email, password):
     return data["token"]
 
 
+def agent_src_dir():
+    """Return a directory containing the agent Go module, cloning the repo into
+    a temp dir when running standalone (e.g. piped straight from raw GitHub)."""
+    go_dir = os.path.join(REPO_DIR, "services", "agent")
+    if os.path.exists(os.path.join(go_dir, "go.mod")):
+        return go_dir
+
+    cache = os.path.join(tempfile.gettempdir(), "uh-agent-src")
+    got = os.path.join(cache, "services", "agent")
+    if os.path.exists(os.path.join(got, "go.mod")):
+        return got
+    os.makedirs(cache, exist_ok=True)
+    info("cloning agent source (standalone run) ...")
+    code, out = sh(["git", "clone", "-q", "--depth", "1", REPO_URL, cache], capture=True)
+    if code != 0:
+        die("could not fetch agent source: " + out)
+    return got
+
+
 def install_node():
     info("Installing node agent...")
-    go_dir = os.path.join(REPO_DIR, "services", "agent")
-    if not os.path.exists(os.path.join(go_dir, "go.mod")):
-        die("agent module not found — run this from the UptimeHost checkout root.")
+    go_dir = agent_src_dir()
     require("go")
     os.makedirs(os.path.join(go_dir, "bin"), exist_ok=True)
     code, out = sh(["go", "build", "-o", os.path.join(go_dir, "bin", "uh-agent"), "./cmd/agent"], cwd=go_dir, capture=True)
