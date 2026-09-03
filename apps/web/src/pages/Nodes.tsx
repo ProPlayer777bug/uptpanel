@@ -97,6 +97,8 @@ function CreateNodeModal({ locations, onClose, onCreated }: { locations: any[]; 
   const [agentToken, setAgentToken] = useState('')
   const [memoryMb, setMemoryMb] = useState('8192')
   const [diskGb, setDiskGb] = useState('100')
+  const [portRangeStart, setPortRangeStart] = useState('25565')
+  const [portRangeEnd, setPortRangeEnd] = useState('25597')
   const [busy, setBusy] = useState(false)
 
   useEffect(() => { if (locations.length && !locationId) setLocationId(locations[0].id) }, [locations])
@@ -113,6 +115,8 @@ function CreateNodeModal({ locations, onClose, onCreated }: { locations: any[]; 
         agentToken: agentToken || undefined,
         memoryMb: Number(memoryMb),
         diskGb: Number(diskGb),
+        portRangeStart: Number(portRangeStart),
+        portRangeEnd: Number(portRangeEnd),
       })
       toast.ok('Node added')
       onCreated(r.node?.installCommand || '')
@@ -133,7 +137,7 @@ function CreateNodeModal({ locations, onClose, onCreated }: { locations: any[]; 
           </div>
         </div>
         <div className="field">
-          <label>Connection &amp; protocol</label>
+          <label>Connection & protocol</label>
           <div className="flex gap-2" style={{ alignItems: 'center' }}>
             <select className="select" style={{ width: 110 }} value={scheme} onChange={(e) => setScheme(e.target.value as 'http' | 'https')}>
               <option value="http">http://</option>
@@ -150,6 +154,11 @@ function CreateNodeModal({ locations, onClose, onCreated }: { locations: any[]; 
           <div className="field"><label>Memory (MB)</label><input className="input" value={memoryMb} onChange={(e) => setMemoryMb(e.target.value)} /></div>
           <div className="field"><label>Disk (GB)</label><input className="input" value={diskGb} onChange={(e) => setDiskGb(e.target.value)} /></div>
         </div>
+        <div className="grid cols-2">
+          <div className="field"><label>Port range start</label><input className="input" type="number" value={portRangeStart} onChange={(e) => setPortRangeStart(e.target.value)} placeholder="e.g., 25565" /></div>
+          <div className="field"><label>Port range end</label><input className="input" type="number" value={portRangeEnd} onChange={(e) => setPortRangeEnd(e.target.value)} placeholder="e.g., 25597" /></div>
+        </div>
+        <span className="xs text-3">Servers on this node will automatically receive ports from this range (e.g., 25565-25597).</span>
       </div>
       <div className="actions">
         <button className="btn" onClick={onClose}>Cancel</button>
@@ -164,7 +173,7 @@ function InstallModal({ nodeId, command, onClose }: { nodeId: string; command: s
     navigator.clipboard?.writeText(command).then(() => toast.ok('Copied'), () => toast.err('Copy failed'))
   }
   return (
-    <Modal open onClose={onClose} title={`Install agent${nodeId ? ` — ${nodeId}` : ''}`} width={620}>
+    <Modal open onClose={onClose} title={`Install agent${nodeId ? ` \u2014 ${nodeId}` : ''}`} width={620}>
       <p className="sm text-3 mb-2">
         Paste this on the machine where the agent should run. It enrolls the node into the panel by advertising its
         connection endpoint, then keeps reporting liveness. The agent can be installed on any host that can reach the panel.

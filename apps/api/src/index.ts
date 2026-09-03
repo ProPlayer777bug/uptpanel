@@ -233,6 +233,37 @@ function remaining(node: any) {
   return { ...used, memAvail, diskAvail }
 }
 
+// Port allocation from node's configured range (e.g., 25565-25597).
+// Returns an array of allocation objects, one per needed port.
+function allocatePorts(node: any, count: number): { id: string; port: number; proto: string }[] {
+  if (!node.portRangeStart || !node.portRangeEnd || node.portRangeEnd < node.portRangeStart) {
+    return [] // no range configured
+  }
+  // Collect all ports currently allocated on this node
+  const used = new Set<number>()
+  for (const s of store.db.servers) {
+    if (s.nodeId === node.id) {
+      for (const a of s.allocations || []) {
+        if (typeof a.port === 'number') used.add(a.port)
+      }
+    }
+  }
+  const out: { id: string; port: number; proto: string }[] = []
+  for (let i = 0; i < count; i++) {
+    let port = -1
+    for (let p = node.portRangeStart; p <= node.portRangeEnd; p++) {
+      if (!used.has(p)) {
+        port = p
+        used.add(p)
+        break
+      }
+    }
+    if (port === -1) break // range exhausted
+    out.push({ id: nanoid(8), port, proto: 'tcp' })
+  }
+  return out
+}
+
 // ---------------------------------------------------------------------------
 // Node security (§4) — cryptographically random, revocable, rotatable tokens.
 // Returns the plaintext once; callers must store it in agent config.
@@ -432,7 +463,7 @@ app.post('/api/nodes', async (req, reply) => {
   const user = me(req)
   if (!user) return reply.code(401).send({ ok: false, error: 'UNAUTHENTICATED' })
   if (!can(user, 'admin')) return reply.code(403).send({ ok: false, error: 'FORBIDDEN' })
-  const { name, locationId, scheme, host, port, agentUrl, agentToken, memoryMb, diskGb, overcommit } = (req.body || {}) as any
+  const { name, locationId, scheme, host, port, agentUrl, agentToken, memoryMb, diskGb, overcommit, portRangeStart, portRangeEnd } = (req.body || {}) as any
   const node: any = {
     id: nanoid(10),
     name: name || 'New Node',
@@ -456,6 +487,8 @@ app.post('/api/nodes', async (req, reply) => {
     agentVersion: null,
     createdAt: Date.now(),
     health: null,
+    portRangeStart: portRangeStart ? Number(portRangeStart) : undefined,
+    portRangeEnd: portRangeEnd ? Number(portRangeEnd) : undefined,
   }
   node.agentUrl = buildAgentUrl(node)
   node.registrationToken = generateNodeToken()
@@ -761,7 +794,10 @@ app.post('/api/servers', async (req, reply) => {
     memoryLimitMb: memoryMb || bp.recommendedMemoryMb,
     storageGb: storageGb || bp.recommendedStorageGb,
     extraEnv: extraEnv || {},
-    allocations: bp.ports.map((p: number) => ({ id: nanoid(8), port: p, proto: 'tcp' })),
+    // Allocate ports from node's range if configured, else use blueprint fixed ports
+    allocations: (node.portRangeStart && node.portRangeEnd)
+      ? allocatePorts(node, bp.ports.length)
+      : bp.ports.map((p: number) => ({ id: nanoid(8), port: p, proto: 'tcp' })),
     createdAt: Date.now(),
     installed: false,
     startedAt: null,

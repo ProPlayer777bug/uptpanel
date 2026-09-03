@@ -3,6 +3,7 @@ import { Icon } from '../../components/ui'
 import type { Server } from '@uptimehost/types'
 
 interface Line { id: number; kind: 'out' | 'in' | 'sys'; text: string; ts: number }
+interface ConsoleMsg { type: 'log' | 'input' | 'status'; line: string }
 
 let seq = 0
 
@@ -22,12 +23,15 @@ export function ConsoleTab({ server }: { server: Server }) {
     ws.onopen = () => { setAttached(true); add({ kind: 'sys', text: 'console attached' }) }
     ws.onmessage = (ev) => {
       const raw = String(ev.data)
-      let text = raw
       try {
-        const j = JSON.parse(raw)
-        if (j && typeof j === 'object' && 'line' in j) text = j.line
-      } catch { /* raw frame */ }
-      add({ kind: 'out', text: text.replace(/\u001b\[[0-9;]*m/g, '') })
+        const msg = JSON.parse(raw) as ConsoleMsg
+        if (msg && msg.line) {
+          const kind = msg.type === 'status' ? 'sys' : msg.type === 'input' ? 'in' : 'out'
+          add({ kind, text: msg.line.replace(/\u001b\[[0-9;]*m/g, '') })
+        }
+      } catch {
+        add({ kind: 'out', text: raw.replace(/\u001b\[[0-9;]*m/g, '') })
+      }
     }
     ws.onclose = (e) => { setAttached(false); add({ kind: 'sys', text: e.code === 4009 ? 'node unreachable' : 'console detached' }) }
     return () => { alive.current = false; try { ws.close() } catch {} }
@@ -44,7 +48,7 @@ export function ConsoleTab({ server }: { server: Server }) {
     const cmd = input.trim()
     if (!cmd || !wsRef.current) return
     add({ kind: 'in', text: `$ ${cmd}` })
-    wsRef.current.send(cmd)
+    wsRef.current.send(JSON.stringify({ type: 'command', line: cmd }))
     setInput('')
   }
 

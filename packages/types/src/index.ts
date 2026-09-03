@@ -65,6 +65,9 @@ export interface Node {
   allocatedMemoryMb: number
   allocatedDiskGb: number
   createdAt: number
+  // Port range for automatic allocation (e.g., 25565-25597)
+  portRangeStart?: number
+  portRangeEnd?: number
 }
 
 export interface Allocation {
