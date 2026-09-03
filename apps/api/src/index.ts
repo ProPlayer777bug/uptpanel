@@ -19,6 +19,12 @@ import WebSocket from 'ws'
 
 const PORT = Number(process.env.UH_API_PORT || 8081)
 
+// Pterodactyl-style Paper jar pinned to 1.21.11 build 132 (Java-21 compatible,
+// matching the PaperMC yolks image). Downloaded into the server data dir by the
+// node agent during provisioning/reinstall.
+const PAPER_21_11_JAR =
+  'https://fill-data.papermc.io/v1/objects/5ffef465eeeb5f2a3c23a24419d97c51afd7dbb4923ff42df9a3f58bba1ccfba/paper-1.21.11-132.jar'
+
 // Tracks servers for which the panel has already auto-accepted the Minecraft
 // EULA during this process lifetime, so we only write eula=true once per boot.
 const autoEulaAccepted = new Set<string>()
@@ -998,23 +1004,31 @@ app.post('/api/servers', async (req, reply) => {
 
   // Forward the container to the node agent (asynchronous install: pull image).
   const client = agentFor(node)!
-  const manifest = {
-    id,
-    name: server.name,
-    image: bp.image,
-    startup: bp.startup ? bp.startup.trim().split(/\s+/) : undefined,
-    env: { ...bp.environment, ...server.extraEnv },
-    ports: Object.fromEntries(server.allocations.map((a: any) => [`${a.port}/tcp`, String(a.port)])),
-    memoryMb: server.memoryLimitMb,
-    cpuPercent: server.cpuPercent,
-    diskMb: server.storageGb * 1024,
-    mountData: '',
-  }
+  const manifest = buildManifest(server)
   launch(server, client, manifest, user)
   audit(store, user.name, 'CREATE_SERVER', `server:${server.name}`)
   activity(user, 'server', 'info', `Creating ${server.name}`, { serverId: id })
   return reply.code(201).send({ ok: true, server: withRelations(server) })
 })
+
+// Build the container manifest forwarded to the node agent. Centralised so
+// provisioning, reinstall and self-healing start all recreate identical
+// containers from the server's stored blueprint/env/allocations.
+function buildManifest(server: any): any {
+  const bp = store.db.blueprints.find((b: any) => b.id === server.blueprintId)
+  return {
+    id: server.id,
+    name: server.name,
+    image: bp?.image,
+    startup: bp?.startup ? (bp.startup as string).trim().split(/\s+/) : undefined,
+    env: { ...(bp?.environment || {}), ...(server.extraEnv || {}) },
+    ports: Object.fromEntries((server.allocations || []).map((a: any) => [`${a.port}/tcp`, String(a.port)])),
+    memoryMb: server.memoryLimitMb,
+    cpuPercent: server.cpuPercent,
+    diskMb: server.storageGb * 1024,
+    mountData: '',
+  }
+}
 
 function launch(server: any, client: AgentClient, manifest: any, user: any) {
   const stages = [
@@ -1074,7 +1088,25 @@ app.post('/api/servers/:id/power', async (req, reply) => {
   hub.to(`srv:${id}`, { type: 'server-update', data: server })
   pushTerminal(id, `[control] ${action} requested`)
   try {
-    await client.power(server.id, action)
+    if (action === 'start') {
+      try {
+        await client.power(server.id, 'start')
+      } catch (startErr: any) {
+        const msg = String(startErr?.message || startErr || '')
+        // The container vanished from the node ("No such container"). Rebuild
+        // it from the stored manifest, then retry the start so the panel
+        // self-heals instead of leaving the server stuck in 'error'.
+        if (server.installed && /no such container/i.test(msg)) {
+          pushTerminal(id, '[control] container missing — recreating from manifest')
+          await client.createContainer(buildManifest(server))
+          await client.power(server.id, 'start')
+        } else {
+          throw startErr
+        }
+      }
+    } else {
+      await client.power(server.id, action)
+    }
     if (action === 'start') { server.state = 'running'; server.startedAt = Date.now() }
     if (action === 'stop' || action === 'kill') { server.state = 'offline'; server.startedAt = null }
     if (action === 'restart') server.state = 'running'
@@ -1453,19 +1485,7 @@ app.post('/api/servers/:id/reinstall', async (req, reply) => {
   pushTerminal(id, '[reinstall] wiping data and rebuilding ...', 'warn')
   try {
     await client.reinstall(server.id)
-    const bp = store.db.blueprints.find((b) => b.id === server.blueprintId)
-    await client.createContainer({
-      id: server.id,
-      name: server.name,
-      image: bp?.image,
-      startup: bp?.startup ? bp.startup.trim().split(/\s+/) : undefined,
-      env: { ...(bp?.environment || {}), ...(server.extraEnv || {}) },
-      ports: Object.fromEntries(server.allocations.map((a: any) => [`${a.port}/tcp`, String(a.port)])),
-      memoryMb: server.memoryLimitMb,
-      cpuPercent: server.cpuPercent,
-      diskMb: server.storageGb * 1024,
-      mountData: '',
-    })
+    await client.createContainer(buildManifest(server))
     await seedServerFiles(server, client)
     server.state = 'offline'
     server.installed = true
@@ -1837,6 +1857,24 @@ async function seedServerFiles(server: any, client: AgentClient) {
     },
   }
   const files = defaults[server.blueprintId] || {}
+
+  // Pterodactyl-style Paper: install a real server.jar from PaperMC, plus the
+  // EULA agreement and a server.properties bound to the server's first port.
+  if (server.blueprintId === 'bp-paper') {
+    const port = (server.allocations && server.allocations[0]?.port) || 25565
+    try { await client.downloadFile(server.id, 'server.jar', PAPER_21_11_JAR) } catch { /* best-effort */ }
+    files['eula.txt'] = 'eula=true\n'
+    files['server.properties'] = [
+      'server-port=' + port,
+      'online-mode=true',
+      'motd=UptimeHost Minecraft Server',
+      'max-players=20',
+      'view-distance=10',
+      'spawn-protection=0',
+      '',
+    ].join('\n')
+  }
+
   for (const [path, content] of Object.entries(files)) {
     try { await client.writeFile(server.id, path, content) } catch { /* best-effort */ }
   }

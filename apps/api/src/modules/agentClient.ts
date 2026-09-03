@@ -125,6 +125,9 @@ export class AgentClient {
   writeFile(containerId: string, path: string, content: string) {
     return this.req('POST', `/api/containers/${containerId}/files/write`, { path, content })
   }
+  downloadFile(containerId: string, path: string, url: string) {
+    return this.req('POST', `/api/containers/${containerId}/files/download`, { path, url })
+  }
   containerLogs(containerId: string, tail?: number) {
     return this.req('GET', `/api/containers/${containerId}/logs?tail=${tail || 200}`)
   }

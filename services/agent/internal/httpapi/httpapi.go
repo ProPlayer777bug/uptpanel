@@ -430,6 +430,56 @@ func (s *Server) handleFiles(ctx context.Context, w http.ResponseWriter, r *http
 		}
 		writeJSON(w, 200, map[string]any{"ok": true, "path": body.Path})
 
+	case strings.HasPrefix(sub, "files/download") && r.Method == http.MethodPost:
+		// Stream an external (binary) file into the server's data dir — used to
+		// install the Paper server.jar. Pterodactyl-style, provisioning downloads
+		// the jar on the node (which has internet) rather than through the panel.
+		var body struct {
+			Path string `json:"path"`
+			URL  string `json:"url"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			writeJSON(w, 400, map[string]any{"error": err.Error()})
+			return
+		}
+		if body.URL == "" || body.Path == "" {
+			writeJSON(w, 400, map[string]any{"error": "url and path required"})
+			return
+		}
+		target := resolvePath(hostRoot, body.Path)
+		if target == "" {
+			writeJSON(w, 400, map[string]any{"error": "unsafe path"})
+			return
+		}
+		if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+			writeJSON(w, 500, map[string]any{"error": err.Error()})
+			return
+		}
+		req, _ := http.NewRequest(http.MethodGet, body.URL, nil)
+		req.Header.Set("User-Agent", "uptimehost-agent/1.0")
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			writeJSON(w, 502, map[string]any{"error": "download: " + err.Error()})
+			return
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			writeJSON(w, 502, map[string]any{"error": "download failed: " + resp.Status})
+			return
+		}
+		f, err := os.Create(target)
+		if err != nil {
+			writeJSON(w, 500, map[string]any{"error": err.Error()})
+			return
+		}
+		if _, err := io.Copy(f, resp.Body); err != nil {
+			f.Close()
+			writeJSON(w, 500, map[string]any{"error": err.Error()})
+			return
+		}
+		f.Close()
+		writeJSON(w, 200, map[string]any{"ok": true, "path": body.Path})
+
 	default: // files list
 		entries, err := os.ReadDir(fsPath)
 		if err != nil {
