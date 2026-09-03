@@ -367,8 +367,32 @@ def banner():
     print("=" * 58)
 
 
+def run_option(n):
+    if not (1 <= n <= len(MENU)):
+        err(f"invalid option: {n}")
+        return 1
+    info(f"running: {MENU[n - 1][0]}")
+    try:
+        MENU[n - 1][1]()
+        info("Done.")
+        return 0
+    except KeyboardInterrupt:
+        warn("interrupted")
+        return 130
+    except Exception as e:
+        err(f"step failed: {e}")
+        return 1
+
+
 def main():
     banner()
+    args = sys.argv[1:]
+    if args:
+        arg = args[0]
+        if arg.isdigit() and arg != "0":
+            return run_option(int(arg))
+        err("usage: python3 setup.py [1-6]")
+        return 1
     while True:
         print()
         print("Select an option:")
@@ -389,13 +413,7 @@ def main():
         if not choice.isdigit() or not (1 <= int(choice) <= len(MENU)):
             warn("invalid option")
             continue
-        try:
-            MENU[int(choice) - 1][1]()
-            info("Done.")
-        except KeyboardInterrupt:
-            warn("interrupted")
-        except Exception as e:
-            err(f"step failed: {e}")
+        run_option(int(choice))
 
 
 if __name__ == "__main__":

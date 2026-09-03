@@ -81,10 +81,10 @@ else
   (cd "$DIR" && git pull --ff-only)
 fi
 
-say "Running setup.py — pick an option (1 install panel, 2 install node, ...)"
+say "Running setup.py — pass an option to run non-interactively, e.g. '1' installs panel."
 cd "$DIR"
 if [ -f setup.py ]; then
-  python3 setup.py
+  python3 setup.py "$@"
 else
   fail "setup.py not found in repo; ensure it is committed to GitHub."
 fi
