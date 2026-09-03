@@ -19,6 +19,10 @@ import WebSocket from 'ws'
 
 const PORT = Number(process.env.UH_API_PORT || 8081)
 
+// Tracks servers for which the panel has already auto-accepted the Minecraft
+// EULA during this process lifetime, so we only write eula=true once per boot.
+const autoEulaAccepted = new Set<string>()
+
 const app = Fastify({ logger: false })
 const store = new Store()
 seed(store)
@@ -1948,7 +1952,34 @@ app.register(async (app) => {
     const wsUrl = node.agentUrl.replace(/^http/, 'ws').replace(/\/$/, '') + `/api/containers/${server.id}/ws`
     const agent = new WebSocket(wsUrl, { headers: { authorization: `Bearer ${node.agentToken}` } })
     agent.on('open', () => socket.send(JSON.stringify({ type: 'system', line: 'console attached' })))
-    agent.on('message', (data) => socket.send(String(data)))
+    agent.on('message', (data) => {
+      socket.send(String(data))
+      // Auto EULA acceptor: Minecraft refuses to start until eula.txt agrees.
+      // When the console stream flags the EULA prompt we write eula=true into
+      // the container's workdir (once per server) and restart it if stopped.
+      const raw = String(data)
+      const lower = raw.toLowerCase()
+      const isEulaPrompt = lower.includes('eula') && (lower.includes('agree') || lower.includes('eula.txt') || lower.includes('accept the eula'))
+      if (isEulaPrompt && !autoEulaAccepted.has(server.id)) {
+        autoEulaAccepted.add(server.id)
+        socket.send(JSON.stringify({ type: 'status', line: 'Auto-accepting Minecraft EULA (eula=true)…' }))
+        const client = agentFor(node)
+        client?.command(server.id, 'echo eula=true > eula.txt').then(async () => {
+          socket.send(JSON.stringify({ type: 'status', line: 'EULA accepted — restarting server' }))
+          if (server.state === 'offline' || server.state === 'error') {
+            try {
+              await client.power(server.id, 'start')
+              server.state = 'running'
+              server.startedAt = Date.now()
+              store.persist()
+              hub.to(`srv:${server.id}`, { type: 'server-update', data: server })
+            } catch { /* container already starting — reconciled shortly */ }
+          }
+        }).catch((e: any) => {
+          socket.send(JSON.stringify({ type: 'status', line: 'EULA auto-accept failed: ' + (e?.message || 'unknown') }))
+        })
+      }
+    })
     agent.on('close', () => socket.send(JSON.stringify({ type: 'status', line: 'console detached' })))
     agent.on('error', () => socket.send(JSON.stringify({ type: 'status', line: 'console error' })))
     socket.on('message', (raw: Buffer) => { if (agent.readyState === WebSocket.OPEN) agent.send(String(raw)) })
