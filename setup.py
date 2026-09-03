@@ -391,8 +391,11 @@ def main():
         arg = args[0]
         if arg.isdigit() and arg != "0":
             return run_option(int(arg))
-        err("usage: python3 setup.py [1-6]")
+        err("usage: python3 setup.py [1-6]  (or set UH_OPT=1..6)")
         return 1
+    opt = os.environ.get("UH_OPT", "").strip()
+    if opt.isdigit() and opt != "0":
+        return run_option(int(opt))
     while True:
         print()
         print("Select an option:")
