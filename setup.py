@@ -8,8 +8,10 @@ operates the UptimeHost control plane on the current machine.
 
     [1] Install panel        install requirements, build the web bundle, and
                              start the API + web services in the background.
-    [2] Install node         build the Go node agent and run it in the
-                             background against the panel.
+    [2] Install node         build the Go node agent, then connect it to the
+                             panel: it asks for the panel API URL + admin
+                             credentials, creates this node (FQDN/IP, memory,
+                             disk), and runs the agent so it enrolls online.
     [3] Uninstall panel      stop the panel API + web services and remove the
                              built web bundle.
     [4] Uninstall node       stop the node agent.
@@ -263,9 +265,29 @@ def install_panel():
     return True
 
 
+def parse_install_command(text):
+    """Extract `export UH_*=...` assignment pairs from a panel install command."""
+    env = {}
+    for line in (text or "").splitlines():
+        line = line.strip()
+        if not line.startswith("export UH_"):
+            continue
+        rest = line[len("export "):]
+        key, _, val = rest.partition("=")
+        if key:
+            env[key.strip()] = val.strip().strip('"').strip("'")
+    return env
+
+
+def login_panel(base, email, password):
+    code, data = http_json(base + "/api/auth/login", {"email": email, "password": password})
+    if code not in (200, 201) or not data.get("token"):
+        die(f"panel login failed ({code}): {data.get('error', data)}")
+    return data["token"]
+
+
 def install_node():
     info("Installing node agent...")
-    state = load_state()
     go_dir = os.path.join(REPO_DIR, "services", "agent")
     if not os.path.exists(os.path.join(go_dir, "go.mod")):
         die("agent module not found — run this from the UptimeHost checkout root.")
@@ -274,28 +296,63 @@ def install_node():
     code, out = sh(["go", "build", "-o", os.path.join(go_dir, "bin", "uh-agent"), "./cmd/agent"], cwd=go_dir, capture=True)
     if code != 0:
         die("agent build failed:\n" + out)
-    node_id = param("Node ID", "UH_NODE_ID", "node_id", "node-local")
-    token = param("Agent shared token", "UH_AGENT_TOKEN", "agent_token", "agent-secret")
-    scheme = param("Agent scheme [http/https]", "UH_AGENT_SCHEME", "scheme", "http")
-    host = param("Agent host/FQDN the panel will reach", "UH_AGENT_HOST", "host", "localhost")
-    addr = param("Agent listen address", "UH_AGENT_ADDR", "agent_addr", ":7373")
-    core_url = param("Panel API base URL", "UH_API_URL", None, API_URL)
-    start_daemon(
-        "node-agent",
-        [os.path.join(go_dir, "bin", "uh-agent")],
-        cwd=go_dir,
-        env={
-            "UH_NODE_ID": node_id,
-            "UH_AGENT_TOKEN": token,
-            "UH_AGENT_SCHEME": scheme,
-            "UH_AGENT_HOST": host,
-            "UH_AGENT_ADDR": addr,
-            "UH_CORE_URL": core_url.rstrip("/") + "/api/nodes/register",
-        },
+
+    info("--- Connect this node to the panel ---")
+    base = param("Panel API URL", "UH_API_URL", None, API_URL).rstrip("/")
+    email = os.environ.get("UH_PANEL_EMAIL")
+    token = os.environ.get("UH_PANEL_TOKEN")
+    if email and not token:
+        pwd = os.environ.get("UH_PANEL_PASSWORD")
+        if not pwd:
+            if not sys.stdin.isatty():
+                die("set UH_PANEL_EMAIL + UH_PANEL_PASSWORD (or UH_PANEL_TOKEN) to connect (stdin is not a TTY)", 2)
+            try:
+                pwd = getpass.getpass(f"Panel admin password for {email}: ")
+            except (EOFError, KeyboardInterrupt):
+                die("no panel password provided", 2)
+        token = login_panel(base, email, pwd)
+    if not token:
+        if not sys.stdin.isatty():
+            die("set UH_PANEL_EMAIL + UH_PANEL_PASSWORD (or UH_PANEL_TOKEN) to connect (stdin is not a TTY)", 2)
+        email = input("Panel admin email: ").strip()
+        try:
+            pwd = getpass.getpass("Panel admin password: ")
+        except (EOFError, KeyboardInterrupt):
+            die("no panel password provided", 2)
+        token = login_panel(base, email, pwd)
+
+    host = param("This node's FQDN/IP the panel reaches it at", "UH_AGENT_HOST", "host", "")
+    port = param("Agent listen port", "UH_AGENT_PORT", "agent_port", "7373")
+    name = param("Node name", "UH_NODE_NAME", "node_name", "New Node")
+    memory = param("Node memory (MB)", "UH_NODE_MEMORY", "node_memory", "8192")
+    disk = param("Node disk (GB)", "UH_NODE_DISK", "node_disk", "100")
+    if not host:
+        die("this node's FQDN/IP is required — set UH_AGENT_HOST", 2)
+
+    code, data = http_json(
+        base + "/api/nodes",
+        {"name": name, "scheme": "http", "host": host, "port": int(port),
+         "memoryMb": int(memory), "diskGb": int(disk)},
+        token=token,
     )
-    state.update(node_id=node_id, agent_token=token, scheme=scheme, host=host, agent_addr=addr)
+    if code not in (200, 201) or not data.get("node"):
+        die(f"failed to create node on panel ({code}): {data.get('error', data)}")
+    node = data["node"]
+    env = parse_install_command(node.get("installCommand", ""))
+    if not env.get("UH_CORE_URL"):
+        die("panel did not return an install command for the node")
+
+    start_daemon("node-agent", [os.path.join(go_dir, "bin", "uh-agent")], cwd=go_dir, env=env)
+    state = load_state()
+    state.update(
+        node_id=env.get("UH_NODE_ID", node["id"]),
+        agent_token=env.get("UH_AGENT_TOKEN", ""),
+        scheme=env.get("UH_AGENT_SCHEME", "http"),
+        host=host,
+        agent_addr=env.get("UH_AGENT_ADDR", ":" + port),
+    )
     save_state(state)
-    info("Node agent started. Add this host to the panel as a node and it will self-register.")
+    info(f"Node agent connected to {base}; node {node['name']} ({env.get('UH_NODE_ID', node['id'])}) enrolled and online.")
     return True
 
 
