@@ -81,9 +81,13 @@ else
   (cd "$DIR" && git pull --ff-only)
 fi
 
-say "Running setup.py — pass an option to run non-interactively, e.g. '1' installs panel."
+say "Running setup.py — pick an option (1 install panel, 2 install node, ...)"
 cd "$DIR"
 if [ -f setup.py ]; then
+  # Clear any stale UH_OPT from the parent shell so the interactive menu is
+  # always shown. For unattended installs set the option on the repo clone
+  # directly:  (cd "$DIR" && UH_OPT=1 python3 setup.py)
+  unset UH_OPT
   python3 setup.py "$@"
 else
   fail "setup.py not found in repo; ensure it is committed to GitHub."
