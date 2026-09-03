@@ -107,6 +107,25 @@ def save_state(state):
         json.dump(state, f, indent=2)
 
 
+def param(label, env, state_key=None, default=None):
+    """Resolve a value: env var > saved state > default > interactive prompt.
+    Never blocks when stdin is not a TTY (e.g. piped curl|bash)."""
+    val = os.environ.get(env)
+    if not val and state_key:
+        val = (load_state() or {}).get(state_key)
+    if not val and default is not None:
+        val = default
+    if val is not None:
+        return str(val)
+    if not sys.stdin.isatty():
+        die(f"'{label}' required — set env {env} (stdin is not a TTY)", 2)
+    try:
+        got = input(f"{label}: ").strip()
+    except (EOFError, KeyboardInterrupt):
+        die(f"'{label}' required — set env {env}", 2)
+    return got or default
+
+
 def pid_file(name):
     return os.path.join(REPO_DIR, f".{name}.pid")
 
@@ -255,12 +274,12 @@ def install_node():
     code, out = sh(["go", "build", "-o", os.path.join(go_dir, "bin", "uh-agent"), "./cmd/agent"], cwd=go_dir, capture=True)
     if code != 0:
         die("agent build failed:\n" + out)
-    node_id = state.get("node_id") or input("Node ID (leave blank for panel-generated): ").strip() or "node-local"
-    token = state.get("agent_token") or input("Agent shared token: ").strip() or "agent-secret"
-    scheme = state.get("scheme") or input("Agent scheme [http/https] (default http): ").strip() or "http"
-    host = state.get("host") or input("Agent host/FQDN the panel will reach (default localhost): ").strip() or "localhost"
-    addr = state.get("agent_addr") or ":7373"
-    core_url = input(f"Panel API base URL [{API_URL}]: ").strip() or API_URL
+    node_id = param("Node ID", "UH_NODE_ID", "node_id", "node-local")
+    token = param("Agent shared token", "UH_AGENT_TOKEN", "agent_token", "agent-secret")
+    scheme = param("Agent scheme [http/https]", "UH_AGENT_SCHEME", "scheme", "http")
+    host = param("Agent host/FQDN the panel will reach", "UH_AGENT_HOST", "host", "localhost")
+    addr = param("Agent listen address", "UH_AGENT_ADDR", "agent_addr", ":7373")
+    core_url = param("Panel API base URL", "UH_API_URL", None, API_URL)
     start_daemon(
         "node-agent",
         [os.path.join(go_dir, "bin", "uh-agent")],
