@@ -228,6 +228,59 @@ def start_daemon(name, cmd, cwd=None, env=None):
     return p.pid
 
 
+def systemd_available():
+    """True when systemd is PID 1 (Linux hosts running modern distros)."""
+    return (not WIN) and os.path.isdir("/run/systemd/system")
+
+
+def install_agent_service(env, agent_bin):
+    """Install the node agent as a systemd service for auto-start on reboot.
+
+    Writes /etc/systemd/system/my-panel-agent.service with the resolved
+    environment baked in (so a plain `systemctl start` needs no shell env),
+    then enables it. Requires root to write to /etc/systemd/system.
+    """
+    unit = "/etc/systemd/system/my-panel-agent.service"
+    if os.geteuid() != 0:
+        warn("systemd install needs root — skipping (agent can still run via the pid-file daemon).")
+        return False
+    lines = [
+        "[Unit]",
+        "Description=UptimeHost Node Agent",
+        "After=docker.service network-online.target",
+        "Wants=network-online.target",
+        "",
+        "[Service]",
+        "Type=simple",
+        "ExecStart=" + agent_bin,
+        "WorkingDirectory=" + os.path.dirname(agent_bin),
+    ]
+    for k in ("UH_CORE_URL", "UH_NODE_ID", "UH_REG_TOKEN", "UH_AGENT_ADDR",
+              "UH_AGENT_TOKEN", "UH_AGENT_SCHEME", "UH_AGENT_HOST", "UH_AGENT_PORT",
+              "UH_AGENT_TLS_CERT", "UH_AGENT_TLS_KEY", "UH_POLL_INTERVAL"):
+        if env.get(k):
+            v = str(env[k]).replace("%", "%%")
+            lines.append(f"Environment={k}={v}")
+    lines += [
+        "Restart=always",
+        "RestartSec=3",
+        "TimeoutStopSec=10",
+        "",
+        "[Install]",
+        "WantedBy=multi-user.target",
+        "",
+    ]
+    tmp = unit + ".tmp"
+    with open(tmp, "w") as f:
+        f.write("\n".join(lines))
+    os.replace(tmp, unit)
+    sh(["systemctl", "daemon-reload"])
+    sh(["systemctl", "enable", "my-panel-agent.service"])
+    sh(["systemctl", "restart", "my-panel-agent.service"])
+    info("Installed systemd service my-panel-agent.service (auto-starts on reboot).")
+    return True
+
+
 # ---------------------------------------------------------------------------
 # steps
 # ---------------------------------------------------------------------------
@@ -491,15 +544,25 @@ def install_node():
 
     # 8. Ask to start in background
     print()
-    bg = os.environ.get("UH_START_BG", "").strip().lower()
-    if not bg:
-        if sys.stdin.isatty():
-            try:
-                bg = input("Start node agent in background? [y/N]: ").strip().lower()
-            except (EOFError, KeyboardInterrupt):
-                bg = "n"
-    if bg in ("y", "yes"):
-        start_daemon("node-agent", [agent_bin], cwd=go_dir, env=env)
+    want_bg = os.environ.get("UH_START_BG", "").strip().lower()
+    if not want_bg and sys.stdin.isatty():
+        try:
+            want_bg = input("Start node agent in background? [y/N]: ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            want_bg = "n"
+    if want_bg in ("y", "yes"):
+        used_systemd = False
+        if systemd_available():
+            use_sd = os.environ.get("UH_SYSTEMD", "").strip().lower()
+            if not use_sd and sys.stdin.isatty():
+                try:
+                    use_sd = input("Install as systemd service (auto-start on reboot) instead? [Y/n]: ").strip().lower()
+                except (EOFError, KeyboardInterrupt):
+                    use_sd = "y"
+            if use_sd in ("", "y", "yes"):
+                used_systemd = install_agent_service(env, agent_bin)
+        if not used_systemd:
+            start_daemon("node-agent", [agent_bin], cwd=go_dir, env=env)
         state = load_state()
         state.update(
             node_id=env.get("UH_NODE_ID", node["id"]),

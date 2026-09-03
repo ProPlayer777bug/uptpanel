@@ -11,6 +11,7 @@ import (
 	"context"
 	"encoding/json"
 	"log"
+	"math"
 	"net/http"
 	"os"
 	"os/signal"
@@ -19,6 +20,7 @@ import (
 
 	"github.com/uptimehost/agent/internal/config"
 	"github.com/uptimehost/agent/internal/docker"
+	"github.com/uptimehost/agent/internal/hoststats"
 	"github.com/uptimehost/agent/internal/httpapi"
 )
 
@@ -37,7 +39,7 @@ func main() {
 		log.Printf("agent: docker daemon reachable")
 	}
 
-	srv := httpapi.New(dm, cfg.Token, cfg.ContainerBase)
+	srv := httpapi.New(dm, cfg.Token, cfg.NodeID, cfg.ContainerBase)
 	httpSrv := &http.Server{
 		Addr:    cfg.ListenAddr,
 		Handler: srv.Routes(),
@@ -61,7 +63,7 @@ func main() {
 	// tracking. On startup this enrolls the agent (node can be installed on any
 	// system and connect back to the panel) and then keeps reporting liveness.
 	if cfg.CoreURL != "" {
-		go heartbeat(ctx, cfg)
+		go heartbeat(ctx, cfg, dm)
 	}
 
 	<-ctx.Done()
@@ -71,7 +73,7 @@ func main() {
 	log.Println("agent: stopped")
 }
 
-func heartbeat(ctx context.Context, cfg config.Config) {
+func heartbeat(ctx context.Context, cfg config.Config, dm *docker.Client) {
 	tick := time.NewTicker(time.Duration(cfg.PollSeconds) * time.Second)
 	defer tick.Stop()
 
@@ -85,9 +87,23 @@ func heartbeat(ctx context.Context, cfg config.Config) {
 	}
 
 	report := func(register bool) {
+		stats := hoststats.Collect()
+		containers := 0
+		cctx, cancel := context.WithTimeout(ctx, 2*time.Second)
+		if names, err := dm.ListAll(cctx); err == nil {
+			containers = len(names)
+		}
+		cancel()
+
 		payload := map[string]any{
-			"nodeId": cfg.NodeID,
-			"ts":     time.Now().UnixMilli(),
+			"nodeId":        cfg.NodeID,
+			"agentVersion":  "0.2.0",
+			"ts":            time.Now().UnixMilli(),
+			"cpu":           round1(stats.CPU),
+			"memory":        round1(stats.Memory),
+			"disk":          round1(stats.Disk),
+			"containers":    containers,
+			"dockerHealthy": true,
 		}
 		// On first call, enroll with the panel by advertising how to reach us
 		// and presenting the one-time registration token.
@@ -126,4 +142,8 @@ func heartbeat(ctx context.Context, cfg config.Config) {
 			report(false)
 		}
 	}
+}
+
+func round1(v float64) float64 {
+	return math.Round(v*10) / 10
 }

@@ -458,6 +458,8 @@ app.post('/api/nodes/:id/install', async (req, reply) => {
 // Agent outbound registration handshake (unauthenticated by design): the Go
 // agent, installed on any reachable host, calls this with its nodeId + one-time
 // registration token to enroll itself and declare how the panel should reach it.
+// The agent also posts here on every heartbeat tick so the panel can track
+// liveness (lastSeen) and live host resources (cpu/memory/disk/containers).
 app.post('/api/nodes/register', async (req, reply) => {
   const body = (req.body || {}) as any
   const { nodeId, token, scheme, host, port } = body
@@ -471,7 +473,15 @@ app.post('/api/nodes/register', async (req, reply) => {
   if (host) node.host = host
   if (port) node.port = Number(port)
   node.agentUrl = buildAgentUrl(node)
-  node.status = 'online'
+  // Record heartbeat liveness + live host resources reported by the agent.
+  node.lastSeen = Date.now()
+  node.agentVersion = body.agentVersion ?? node.agentVersion
+  node.dockerHealthy = body.dockerHealthy !== false
+  node.cpuPercent = body.cpu
+  node.memoryPercent = body.memory
+  node.diskPercent = body.disk
+  node.containerCount = body.containers
+  node.status = nodeStatus(node)
   store.persist()
   activity(null, 'node', 'info', `${node.name} enrolled and online via ${node.agentUrl}`, { nodeId: node.id })
   return { ok: true, enrolled: true, node: withHealth(node) }
@@ -541,15 +551,39 @@ async function refreshNode(node: any) {
   }
   try {
     const info = await client.ping()
-    node.status = info.online ? 'online' : 'offline'
+    node.lastSeen = Date.now()
     node.dockerHealthy = !!info.dockerHealthy
     node.agentVersion = info.version
+    node.cpuPercent = info.cpuPercent
+    node.memoryPercent = info.memoryPercent
+    node.diskPercent = info.diskPercent
+    node.containerCount = info.containers ?? node.containerCount
     node.health = { reachedAt: info.reachableAt, containers: info.containers, dockerHealthy: info.dockerHealthy }
+    node.status = nodeStatus(node)
   } catch {
-    node.status = 'offline'
     node.dockerHealthy = false
+    node.status = 'offline'
   }
   store.persist()
+}
+
+// Node liveness thresholds (seconds since last heartbeat). A node is ONLINE
+// while heartbeats arrive within UH_NODE_ONLINE_S; WARNING within
+// UH_NODE_WARNING_S; otherwise OFFLINE. Overridable via env.
+const NODE_ONLINE_S = Number(process.env.UH_NODE_ONLINE_S || 60)
+const NODE_WARNING_S = Number(process.env.UH_NODE_WARNING_S || 300)
+
+// nodeStatus derives the live state from the last heartbeat. unconfigured
+// nodes (no credentials) and maintenance windows short-circuit to their own
+// states; otherwise the age of the last heartbeat decides online/warning/offline.
+function nodeStatus(node: any): string {
+  if (node.maintenance) return 'maintenance'
+  if (!node.agentUrl || !node.agentToken) return 'unconfigured'
+  if (!node.lastSeen) return 'offline'
+  const ageSec = (Date.now() - node.lastSeen) / 1000
+  if (ageSec <= NODE_ONLINE_S) return 'online'
+  if (ageSec <= NODE_WARNING_S) return 'warning'
+  return 'offline'
 }
 
 function withHealth(node: any) {
@@ -558,6 +592,7 @@ function withHealth(node: any) {
   const diskUsed = servers.reduce((a: number, s: any) => a + (s.storageGb ?? 0), 0)
   return {
     ...node,
+    status: nodeStatus(node),
     serverCount: servers.length,
     allocatedMemoryMb: memUsed,
     allocatedDiskGb: diskUsed,

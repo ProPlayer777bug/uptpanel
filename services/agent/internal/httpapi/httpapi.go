@@ -18,23 +18,28 @@ import (
 	"github.com/uptimehost/agent/internal/backup"
 	"github.com/uptimehost/agent/internal/console"
 	"github.com/uptimehost/agent/internal/docker"
+	"github.com/uptimehost/agent/internal/signing"
 )
 
 type Server struct {
-	dm    *docker.Client
-	hub   *console.Hub
-	token string
-	base  string
-	mux   *http.ServeMux
+	dm       *docker.Client
+	hub      *console.Hub
+	token    string
+	nodeID   string
+	base     string
+	mux      *http.ServeMux
+	verifier *signing.Verifier
 }
 
-func New(dm *docker.Client, token, base string) *Server {
+func New(dm *docker.Client, token, nodeID, base string) *Server {
 	return &Server{
-		dm:    dm,
-		hub:   console.NewHub(dm),
-		token: token,
-		base:  base,
-		mux:   http.NewServeMux(),
+		dm:       dm,
+		hub:      console.NewHub(dm),
+		token:    token,
+		nodeID:   nodeID,
+		base:     base,
+		mux:      http.NewServeMux(),
+		verifier: signing.NewVerifier(4096),
 	}
 }
 
@@ -50,15 +55,55 @@ func (s *Server) Routes() http.Handler {
 
 func (s *Server) withAuth(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		ah := r.Header.Get("Authorization")
-		if !strings.HasPrefix(ah, "Bearer ") || strings.TrimPrefix(ah, "Bearer ") != s.token {
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusUnauthorized)
-			_ = json.NewEncoder(w).Encode(map[string]any{"error": "unauthorized"})
+		reqID := r.Header.Get("X-Request-ID")
+		if reqID == "" {
+			reqID = signing.NewRequestID()
+		}
+		w.Header().Set("X-Request-ID", reqID)
+
+		if !s.authorize(r) {
+			writeErr(w, reqID, http.StatusUnauthorized, "UNAUTHORIZED", "request signature or node secret invalid")
 			return
 		}
 		next(w, r)
 	}
+}
+
+// authorize accepts a request when it carries a valid HMAC signature over the
+// canonical request (preferred, short-lived + replay-protected) OR, as a
+// transitional fallback, a matching static bearer token. The bearer path is
+// kept so existing deployments and the console upgrade chain keep working.
+func (s *Server) authorize(r *http.Request) bool {
+	nodeID := r.Header.Get("X-Node-ID")
+	sig := r.Header.Get("X-Signature")
+	ts := r.Header.Get("X-Timestamp")
+	reqID := r.Header.Get("X-Request-ID")
+
+	if nodeID != "" || sig != "" || ts != "" {
+		if nodeID != s.nodeID {
+			return false
+		}
+		body, _ := io.ReadAll(r.Body)
+		r.Body = io.NopCloser(strings.NewReader(string(body)))
+		res := s.verifier.Verify(nodeID, r.Method, r.URL.RequestURI(), reqID, ts, sig, s.token, body, time.Now())
+		return res == signing.ResultOK
+	}
+
+	ah := r.Header.Get("Authorization")
+	return strings.HasPrefix(ah, "Bearer ") && strings.TrimPrefix(ah, "Bearer ") == s.token
+}
+
+// writeErr emits the consistent error envelope used by every agent response.
+func writeErr(w http.ResponseWriter, reqID string, code int, errCode, message string) {
+	v := map[string]any{
+		"success":    false,
+		"request_id": reqID,
+		"error": map[string]any{
+			"code":    errCode,
+			"message": message,
+		},
+	}
+	writeJSON(w, code, v)
 }
 
 func writeJSON(w http.ResponseWriter, code int, v any) {
