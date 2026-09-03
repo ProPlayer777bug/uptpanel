@@ -1,15 +1,15 @@
 #!/usr/bin/env bash
 # UptimeHost bootstrap — one-liner installer for fresh Linux / macOS VPS-VDS.
 #
-# Usage (replace USER/REPO with your GitHub repo):
-#   curl -sSL https://raw.githubusercontent.com/USER/REPO/main/bootstrap.sh | bash
+# Usage (public repo, clone over HTTPS — no credentials needed):
+#   curl -sSL https://raw.githubusercontent.com/ProPlayer777bug/uptpanel/main/bootstrap.sh | bash
 #
 # Installs git + Node.js + npm (+ Go + Docker where applicable), clones the
 # UptimeHost source, and opens the setup.py DevOps menu.
 
 set -euo pipefail
 
-REPO_URL="${UH_REPO_URL:-https://github.com/USER/REPO.git}"
+REPO_URL="${UH_REPO_URL:-https://github.com/ProPlayer777bug/uptpanel.git}"
 BRANCH="${UH_BRANCH:-main}"
 DIR="${UH_INSTALL_DIR:-$HOME/uptimehost}"
 
@@ -69,6 +69,10 @@ if ! command_exists docker; then
 fi
 
 # --- Clone ------------------------------------------------------------------
+# Non-interactive: never prompt for a username/password. If the repo is not
+# publicly cloneable this will fail fast instead of hanging on a login prompt.
+export GIT_TERMINAL_PROMPT=0
+export GIT_SSH_COMMAND="ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new"
 if [ ! -d "$DIR/.git" ]; then
   say "Cloning $REPO_URL -> $DIR"
   git clone --depth 1 --branch "$BRANCH" "$REPO_URL" "$DIR"

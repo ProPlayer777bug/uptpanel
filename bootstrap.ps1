@@ -9,7 +9,7 @@
 
 $ErrorActionPreference = "Stop"
 
-$repoUrl = if ($env:UH_REPO_URL) { $env:UH_REPO_URL } else { "https://github.com/USER/REPO.git" }
+$repoUrl = if ($env:UH_REPO_URL) { $env:UH_REPO_URL } else { "https://github.com/ProPlayer777bug/uptpanel.git" }
 $branch  = if ($env:UH_BRANCH)  { $env:UH_BRANCH }  else { "main" }
 $dir     = if ($env:UH_INSTALL_DIR) { $env:UH_INSTALL_DIR } else { Join-Path $HOME "uptimehost" }
 
