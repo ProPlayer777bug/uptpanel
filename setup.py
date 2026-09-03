@@ -219,11 +219,17 @@ def install_panel():
     code, out = sh(["npm", "--prefix", os.path.join(REPO_DIR, "apps", "web"), "run", "build"], cwd=REPO_DIR, capture=True)
     if code != 0:
         warn("web build reported a non-zero exit; continuing anyway:\n" + out[:400])
+    # Locate tsx — npm workspaces hoist bins to the repo-root node_modules/.bin.
+    tsx = os.path.join(REPO_DIR, "node_modules", ".bin", "tsx")
+    if not os.path.exists(tsx):
+        tsx = os.path.join(REPO_DIR, "apps", "api", "node_modules", ".bin", "tsx")
+    if not os.path.exists(tsx):
+        warn(f"tsx not found at {tsx}; is the API dependency installed?")
+        return False
     # Start API
     start_daemon(
         "panel-api",
-        [os.path.join(REPO_DIR, "apps", "api", "node_modules", ".bin", "tsx"),
-         os.path.join(REPO_DIR, "apps", "api", "src", "index.ts")],
+        [tsx, os.path.join(REPO_DIR, "apps", "api", "src", "index.ts")],
         cwd=REPO_DIR,
         env={"UH_API_PORT": API_PORT},
     )
