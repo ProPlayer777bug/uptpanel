@@ -6,6 +6,7 @@ export default defineConfig({
   server: {
     port: 8080,
     host: true,
+    allowedHosts: ['gp1.uptimehost.in', '.uptimehost.in'],
     proxy: {
       '/api': 'http://localhost:8081',
       '/ws': { target: 'ws://localhost:8081', ws: true },

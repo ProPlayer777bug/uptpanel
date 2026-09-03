@@ -279,24 +279,66 @@ function defaultHost(url: string | undefined, scheme: string): string {
   return h || (scheme === 'https' ? 'localhost' : '')
 }
 
-// Install command handed to the operator to enroll any machine. It carries:
-//  - PANEL_REG_URL   -> panel endpoint the agent calls to register (outbound).
-//  - UH_NODE_ID      -> the node id to enroll.
-//  - UH_REG_TOKEN    -> one-time secret authorizing the enrollment.
-//  - UH_AGENT_ADDR/UH_AGENT_TOKEN -> inbound listener + shared secret for the
-//    panel to talk to this agent afterwards.
+// Install command handed to the operator to enroll any machine. It is a single
+// self-contained command: paste it on the node (which only needs Go + git) and
+// it clones the agent, builds the binary, writes every credential to the proper
+// path (/etc/uptimehost/agent.env), then installs/starts a systemd service
+// (restarting it if already running; nohup fallback where systemd is absent).
 function buildInstallCommand(node: any): string {
   const up = process.env.UH_PANEL_URL || `http://${defaultHost(node.agentUrl, node.scheme) || 'localhost'}:8081`
   const base = up.replace(/\/$/, '')
+  const regUrl = `${base}/api/nodes/register`
+  const id = node.id
+  const regToken = node.registrationToken
+  const port = node.port
+  const agentToken = node.agentToken
+  const scheme = node.scheme || 'http'
+  const host = node.host || 'localhost'
+  const repo = 'https://github.com/ProPlayer777bug/uptpanel.git'
   return [
-    `# UptimeHost Node Agent — install on any host that can reach the panel.`,
-    `export UH_CORE_URL="${base}/api/nodes/register"`,
-    `export UH_NODE_ID="${node.id}"`,
-    `export UH_REG_TOKEN="${node.registrationToken}"`,
-    `export UH_AGENT_ADDR=":${node.port}"`,
-    `export UH_AGENT_TOKEN="${node.agentToken}"`,
-    `export UH_CONTAINER_BASE="/var/lib/uptimehost/data"`,
-    `# then run the agent binary (go build ./cmd/agent && ./agent) with these env vars`,
+    `# One-command UptimeHost node install. Requires: git + go.`,
+    `# Paste on the node, then the agent configures + starts itself (idempotent: re-running restarts it).`,
+    `bash -s <<'UH'`,
+    `set -e`,
+    `REPO=/tmp/uptimehost-agent`,
+    `BIN=/usr/local/bin/uh-agent`,
+    `ENVF=/etc/uptimehost/agent.env`,
+    `mkdir -p /etc/uptimehost /var/lib/uptimehost/data`,
+    `if [ ! -d "$REPO/.git" ]; then git clone -q --depth 1 ${repo} "$REPO"; else (cd "$REPO" && git fetch -q origin && git reset -q --hard origin/main); fi`,
+    `(cd "$REPO/services/agent" && go build -o "$BIN" ./cmd/agent)`,
+    `cat > "$ENVF" <<'ENV'`,
+    `UH_CORE_URL=${regUrl}`,
+    `UH_NODE_ID=${id}`,
+    `UH_REG_TOKEN=${regToken}`,
+    `UH_AGENT_ADDR=:${port}`,
+    `UH_AGENT_TOKEN=${agentToken}`,
+    `UH_AGENT_SCHEME=${scheme}`,
+    `UH_AGENT_HOST=${host}`,
+    `UH_CONTAINER_BASE=/var/lib/uptimehost/data`,
+    `ENV`,
+    `if command -v systemctl >/dev/null 2>&1; then`,
+    `  cat > /etc/systemd/system/uh-agent.service <<'SVC'`,
+    `[Unit]`,
+    `Description=UptimeHost Node Agent`,
+    `After=docker.service network-online.target`,
+    `[Service]`,
+    `Type=simple`,
+    `EnvironmentFile=/etc/uptimehost/agent.env`,
+    `ExecStart=/usr/local/bin/uh-agent`,
+    `Restart=always`,
+    `RestartSec=3`,
+    `[Install]`,
+    `WantedBy=multi-user.target`,
+    `SVC`,
+    `  systemctl daemon-reload`,
+    `  systemctl enable uh-agent >/dev/null 2>&1 || true`,
+    `  systemctl restart uh-agent`,
+    `else`,
+    `  pkill -f uh-agent >/dev/null 2>&1 || true`,
+    `  nohup sh -c 'set -a; . \${ENVF}; set +a; \${BIN}' >/var/log/uh-agent.log 2>&1 &`,
+    `fi`,
+    `echo "UH-NODE-OK node=${id} scheme=${scheme} host=${host} port=${port}"`,
+    `UH`,
   ].join('\n')
 }
 
@@ -378,14 +420,14 @@ app.post('/api/nodes', async (req, reply) => {
     host: host || parseHost(agentUrl) || '',
     port: port != null ? Number(port) : parsePort(agentUrl) || 7373,
     agentUrl: agentUrl || '',
-    agentToken: agentToken || '',
+    agentToken: agentToken || generateNodeToken(),
     registrationToken: '',
     installCommand: '',
     memoryMb: memoryMb || 8192,
     diskGb: diskGb || 100,
     overcommit: !!overcommit,
     maintenance: false,
-    tokenCreatedAt: agentToken ? Date.now() : null,
+    tokenCreatedAt: (agentToken || true) ? Date.now() : null,
     status: 'offline',
     dockerHealthy: false,
     agentVersion: null,
