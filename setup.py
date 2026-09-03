@@ -8,12 +8,13 @@ operates the UptimeHost control plane on the current machine.
 
     [1] Install panel        install requirements, build the web bundle, and
                              start the API + web services in the background.
-    [2] Install node         build the Go node agent, then connect it to the
-                             panel: a credentials form asks for the panel URL,
-                             admin email + password (with a live connection
-                             check), node FQDN/IP, http/https, TLS cert paths
-                             for https, creates the node, shows a connection
-                             debug, then asks to start in background y/N.
+    [2] Install node         connect this machine (or a remote one) as a panel
+                             node: asks for the panel URL, admin email + password
+                             (with a live login check), node FQDN/IP, http/https,
+                             creates the node in the panel, then prints the SINGLE
+                             install command (clone -> build -> write creds to
+                             /etc/uptimehost/agent.env -> start a uh-agent systemd
+                             service). Optionally runs it on this machine too.
     [3] Uninstall panel      stop the panel API + web services and remove the
                              built web bundle.
     [4] Uninstall node       stop the node agent.
@@ -501,80 +502,52 @@ def install_node():
     if code not in (200, 201) or not data.get("node"):
         die(f"failed to create node on panel ({code}): {data.get('error', data)}")
     node = data["node"]
-    env = parse_install_command(node.get("installCommand", ""))
-    env.update(extra)
-    env["UH_AGENT_SCHEME"] = scheme
-    if not env.get("UH_CORE_URL"):
-        die("panel did not return an install command for the node")
+    install_cmd = node.get("installCommand") or ""
+    if node.get("agentToken") is None:
+        die("panel did not return an agent token for the node")
 
-    # 7. Connection debug — run agent in foreground briefly and show its logs
-    agent_bin = os.path.join(go_dir, "bin", "uh-agent")
-    info("Starting agent (debug) — showing connection output for a few seconds...")
-    base_env = dict(os.environ)
-    base_env.update(env)
-    p = subprocess.Popen(
-        [agent_bin], cwd=go_dir, env=base_env,
-        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
-    )
-    deadline = time.time() + 8
-    lines = []
-    while time.time() < deadline and p.poll() is None:
-        try:
-            line = p.stdout.readline()
-        except Exception:
-            line = ""
-        if not line:
-            time.sleep(0.2)
-            continue
-        line = line.rstrip()
-        if line:
-            lines.append(line)
-            print("  [agent] " + line)
-    p.terminate()
-    try:
-        p.wait(timeout=3)
-    except Exception:
-        p.kill()
-    joined = " ".join(lines).lower()
-    connected = ("enrolled" in joined) or ("reachable" in joined)
-    if connected:
-        info(f"Agent connected: node enrolled with the panel over {scheme}.")
-    else:
-        info("Agent started but no enrollment logged yet — verify the panel host is reachable from this machine.")
+    # The single command returned by the panel is the canonical way to connect a
+    # node: it clones the agent, builds it, writes every credential to
+    # /etc/uptimehost/agent.env, and starts/restarts a uh-agent systemd service.
 
-    # 8. Ask to start in background
+    # 7. Show the single install command (this is what runs on the node).
     print()
-    want_bg = os.environ.get("UH_START_BG", "").strip().lower()
-    if not want_bg and sys.stdin.isatty():
+    info(f"Node '{node['name']}' created. Run this ONE command on the node machine ({node_url}):")
+    print("-" * 72)
+    print(install_cmd)
+    print("-" * 72)
+    print("   requires git + go on the node; re-running it safely restarts the agent.")
+
+    # 8. Optionally run it on THIS machine (instead of a remote node).
+    print()
+    run_here = os.environ.get("UH_RUN_INSTALL", "").strip().lower()
+    if not run_here and sys.stdin.isatty():
         try:
-            want_bg = input("Start node agent in background? [y/N]: ").strip().lower()
+            run_here = input("Run this install command on THIS machine now? [y/N]: ").strip().lower()
         except (EOFError, KeyboardInterrupt):
-            want_bg = "n"
-    if want_bg in ("y", "yes"):
-        used_systemd = False
-        if systemd_available():
-            use_sd = os.environ.get("UH_SYSTEMD", "").strip().lower()
-            if not use_sd and sys.stdin.isatty():
-                try:
-                    use_sd = input("Install as systemd service (auto-start on reboot) instead? [Y/n]: ").strip().lower()
-                except (EOFError, KeyboardInterrupt):
-                    use_sd = "y"
-            if use_sd in ("", "y", "yes"):
-                used_systemd = install_agent_service(env, agent_bin)
-        if not used_systemd:
-            start_daemon("node-agent", [agent_bin], cwd=go_dir, env=env)
-        state = load_state()
-        state.update(
-            node_id=env.get("UH_NODE_ID", node["id"]),
-            agent_token=env.get("UH_AGENT_TOKEN", ""),
-            scheme=scheme,
-            host=node_url,
-            agent_addr=env.get("UH_AGENT_ADDR", ":" + port),
-        )
-        save_state(state)
-        info(f"Node agent running in background. Node {node['name']} enrolled at {base} over {scheme}.")
+            run_here = "n"
+    if run_here in ("y", "yes"):
+        script = install_cmd
+        if scheme == "https" and extra.get("UH_AGENT_TLS_CERT"):
+            script = (
+                install_cmd.rstrip()
+                + "\n"
+                + f"echo 'UH_AGENT_TLS_CERT={extra['UH_AGENT_TLS_CERT']}' >> /etc/uptimehost/agent.env\n"
+                + f"echo 'UH_AGENT_TLS_KEY={extra['UH_AGENT_TLS_KEY']}' >> /etc/uptimehost/agent.env\n"
+                + "systemctl daemon-reload >/dev/null 2>&1 || true\n"
+                + "systemctl restart uh-agent >/dev/null 2>&1 || true\n"
+            )
+        info("Running install command on this machine (writes /etc/uptimehost + starts uh-agent)...")
+        tmp = os.path.join(REPO_DIR, ".uh-install.sh")
+        with open(tmp, "w") as f:
+            f.write(script + "\n")
+        code2, _ = sh(["bash", tmp], capture=True)
+        if code2 == 0:
+            info(f"Node agent installed on this machine. Node {node['name']} enrolled at {base} over {scheme}.")
+        else:
+            warn("install command returned a non-zero exit — review the output above.")
     else:
-        info("Not starting in background. Start later with the env saved in setup.state.json.")
+        info("Not running locally — copy the single command above to the node and run it there.")
     return True
 
 
