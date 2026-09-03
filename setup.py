@@ -375,7 +375,14 @@ def main():
         for i, (label, _fn) in enumerate(MENU, 1):
             print(f"  {i}. {label}")
         print("  0. Exit")
-        choice = input("> ").strip()
+        try:
+            choice = input("> ").strip()
+        except KeyboardInterrupt:
+            info("Bye.")
+            return 0
+        except EOFError:
+            info("Bye.")
+            return 0
         if choice in ("0", "q", "exit"):
             info("Bye.")
             return 0
