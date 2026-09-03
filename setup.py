@@ -9,9 +9,11 @@ operates the UptimeHost control plane on the current machine.
     [1] Install panel        install requirements, build the web bundle, and
                              start the API + web services in the background.
     [2] Install node         build the Go node agent, then connect it to the
-                             panel: it asks for the panel API URL + admin
-                             credentials, creates this node (FQDN/IP, memory,
-                             disk), and runs the agent so it enrolls online.
+                             panel: a credentials form asks for the panel URL,
+                             admin email + password (with a live connection
+                             check), node FQDN/IP, http/https, TLS cert paths
+                             for https, creates the node, shows a connection
+                             debug, then asks to start in background y/N.
     [3] Uninstall panel      stop the panel API + web services and remove the
                              built web bundle.
     [4] Uninstall node       stop the node agent.
@@ -128,6 +130,24 @@ def param(label, env, state_key=None, default=None):
     return got or default
 
 
+def q(label, env, default=None):
+    """Form-field prompt. env var > (TTY prompt with default) > default.
+    Dies cleanly if a required value is none of those (non-TTY)."""
+    val = os.environ.get(env, "")
+    if val:
+        return val
+    if sys.stdin.isatty():
+        try:
+            suf = "" if default is None else f" [{default}]"
+            got = input(f"{label}{suf}: ").strip()
+        except (EOFError, KeyboardInterrupt):
+            return default
+        return got or default
+    if default is None:
+        die(f"'{label}' required — set env {env} (stdin is not a TTY)", 2)
+    return default
+
+
 def pid_file(name):
     return os.path.join(REPO_DIR, f".{name}.pid")
 
@@ -233,6 +253,55 @@ def install_requirements():
     return True
 
 
+def setup_panel_https(fqdn):
+    """Install nginx + certbot and issue a Let's Encrypt cert for <fqdn>,
+    reverse-proxying https://<fqdn>:443 -> http://127.0.0.1:WEB_PORT (the panel
+    web server). DNS for <fqdn> must already point at this host's public IP."""
+    require("sudo", "HTTPS panel setup needs sudo")
+    if shutil.which("apt-get"):
+        sh(["sudo", "apt-get", "update"])
+        sh(["sudo", "apt-get", "install", "-y", "nginx", "certbot", "python3-certbot-nginx"])
+    elif shutil.which("dnf") or shutil.which("yum"):
+        sh(["sudo", "dnf", "install", "-y", "nginx", "certbot", "python3-certbot-nginx"])
+    else:
+        die("unsupported package manager for nginx/certbot")
+    conf = (
+        f"server {{\n"
+        f"    listen 80;\n"
+        f"    server_name {fqdn};\n"
+        f"    location / {{\n"
+        f"        proxy_pass http://127.0.0.1:{WEB_PORT};\n"
+        f"        proxy_set_header Host $host;\n"
+        f"        proxy_set_header X-Real-IP $remote_addr;\n"
+        f"        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;\n"
+        f"        proxy_set_header X-Forwarded-Proto $scheme;\n"
+        f"        proxy_http_version 1.1;\n"
+        f"        proxy_set_header Upgrade $http_upgrade;\n"
+        f"        proxy_set_header Connection \"upgrade\";\n"
+        f"    }}\n"
+        f"}}\n"
+    )
+    tmp = os.path.join(REPO_DIR, f".nginx-{fqdn}.conf")
+    with open(tmp, "w") as f:
+        f.write(conf)
+    sh(["sudo", "cp", tmp, f"/etc/nginx/sites-available/{fqdn}"])
+    sh(["sudo", "ln", "-sf", f"/etc/nginx/sites-available/{fqdn}", f"/etc/nginx/sites-enabled/{fqdn}"])
+    sh(["sudo", "nginx", "-t"])
+    sh(["sudo", "systemctl", "reload", "nginx"])
+    email = os.environ.get("UH_PANEL_EMAIL") or ""
+    if not email and sys.stdin.isatty():
+        try:
+            email = input("Lets Encrypt email (cert expiry notices, optional): ").strip()
+        except (EOFError, KeyboardInterrupt):
+            email = ""
+    if email:
+        sh(["sudo", "certbot", "--nginx", "-d", fqdn, "--redirect", "--agree-tos", "-m", email, "--non-interactive"])
+    else:
+        sh(["sudo", "certbot", "--nginx", "-d", fqdn, "--redirect", "--register-unsafely-without-email", "--agree-tos", "--non-interactive"])
+    sh(["sudo", "systemctl", "reload", "nginx"])
+    info(f"Panel HTTPS ready at https://{fqdn}  (cert auto-renews via certbot)")
+
+
 def install_panel():
     info("Installing panel...")
     install_requirements()
@@ -261,7 +330,23 @@ def install_panel():
         cwd=REPO_DIR,
         env={"UH_WEB_PORT": WEB_PORT},
     )
-    info(f"Panel started. Web: http://localhost:{WEB_PORT}  API: {API_URL}")
+    mode = os.environ.get("UH_PANEL_MODE", "").strip().lower()
+    if not mode:
+        if not sys.stdin.isatty():
+            die("set UH_PANEL_MODE=http|https to pick the panel access mode (stdin is not a TTY)", 2)
+        mode = input("Serve panel over http or https? [http/https]: ").strip().lower()
+    if mode in ("https", "ssl", "tls"):
+        fqdn = os.environ.get("UH_PANEL_FQDN", "").strip()
+        if not fqdn:
+            if not sys.stdin.isatty():
+                die("set UH_PANEL_FQDN to the panel domain (e.g. gp1.uptimehost.in) for HTTPS", 2)
+            fqdn = input("Panel FQDN (e.g. gp1.uptimehost.in; DNS must point to this host): ").strip()
+        if not fqdn:
+            die("panel FQDN is required for HTTPS")
+        setup_panel_https(fqdn)
+        info(f"Panel running. Open https://{fqdn} in a browser. API: {API_URL}")
+    else:
+        info(f"Panel started. Web: http://localhost:{WEB_PORT}  API: {API_URL}")
     return True
 
 
@@ -298,40 +383,65 @@ def install_node():
         die("agent build failed:\n" + out)
 
     info("--- Connect this node to the panel ---")
-    base = param("Panel API URL", "UH_API_URL", None, API_URL).rstrip("/")
-    email = os.environ.get("UH_PANEL_EMAIL")
-    token = os.environ.get("UH_PANEL_TOKEN")
-    if email and not token:
-        pwd = os.environ.get("UH_PANEL_PASSWORD")
-        if not pwd:
-            if not sys.stdin.isatty():
-                die("set UH_PANEL_EMAIL + UH_PANEL_PASSWORD (or UH_PANEL_TOKEN) to connect (stdin is not a TTY)", 2)
-            try:
-                pwd = getpass.getpass(f"Panel admin password for {email}: ")
-            except (EOFError, KeyboardInterrupt):
-                die("no panel password provided", 2)
-        token = login_panel(base, email, pwd)
+
+    # 1. Panel FQDN / URL
+    base = q("Panel URL (e.g. https://gp1.uptimehost.in or http://192.168.1.5:8081)", "UH_PANEL_URL").strip()
+    if not base:
+        die("panel URL is required")
+    if not base.startswith(("http://", "https://")):
+        base = "http://" + base
+    base = base.rstrip("/")
+
+    # 2. Panel admin credentials (login = first connection debug)
+    email = os.environ.get("UH_PANEL_EMAIL", "")
+    pwd = os.environ.get("UH_PANEL_PASSWORD", "")
+    token = os.environ.get("UH_PANEL_TOKEN", "")
     if not token:
-        if not sys.stdin.isatty():
-            die("set UH_PANEL_EMAIL + UH_PANEL_PASSWORD (or UH_PANEL_TOKEN) to connect (stdin is not a TTY)", 2)
-        email = input("Panel admin email: ").strip()
-        try:
-            pwd = getpass.getpass("Panel admin password: ")
-        except (EOFError, KeyboardInterrupt):
-            die("no panel password provided", 2)
-        token = login_panel(base, email, pwd)
+        if not email:
+            email = q("Panel admin email", "UH_PANEL_EMAIL")
+        if not pwd:
+            if sys.stdin.isatty():
+                pwd = getpass.getpass("Panel admin password: ")
+            else:
+                die("set UH_PANEL_PASSWORD (or UH_PANEL_TOKEN) to connect (stdin is not a TTY)", 2)
+        info(f"Testing connection to {base} ...")
+        code, data = http_json(base + "/api/auth/login", {"email": email, "password": pwd})
+        if code not in (200, 201) or not data.get("token"):
+            err(f"connection failed: login returned {code}: {data.get('error', data)}")
+            die("could not authenticate with the panel — verify the URL and admin credentials")
+        token = data["token"]
+        info("Connected + authenticated with the panel OK.")
 
-    host = param("This node's FQDN/IP the panel reaches it at", "UH_AGENT_HOST", "host", "")
-    port = param("Agent listen port", "UH_AGENT_PORT", "agent_port", "7373")
-    name = param("Node name", "UH_NODE_NAME", "node_name", "New Node")
-    memory = param("Node memory (MB)", "UH_NODE_MEMORY", "node_memory", "8192")
-    disk = param("Node disk (GB)", "UH_NODE_DISK", "node_disk", "100")
-    if not host:
-        die("this node's FQDN/IP is required — set UH_AGENT_HOST", 2)
+    # 3. This node's FQDN/IP
+    node_url = q("This node's FQDN/IP the panel reaches it at (e.g. testn.uptimehost.in)", "UH_AGENT_HOST").strip()
+    if not node_url:
+        die("this node's FQDN/IP is required")
+    port = q("Agent listen port", "UH_AGENT_PORT", "7373").strip() or "7373"
 
+    # 4. Node link http or https
+    scheme_choice = q("Node link http or https?", "UH_AGENT_SCHEME", "http").strip().lower()
+    scheme = "https" if scheme_choice in ("https", "ssl", "tls") else "http"
+
+    # 5. If https, node TLS cert/key paths
+    extra = {}
+    if scheme == "https":
+        info("HTTPS node link selected — provide the node's TLS certificate.")
+        cert = q("Node TLS fullchain cert path", "UH_AGENT_TLS_CERT").strip()
+        key = q("Node TLS private key path", "UH_AGENT_TLS_KEY").strip()
+        if not (os.path.exists(cert) and os.path.exists(key)):
+            die(f"node TLS cert/key not found: {cert!r}, {key!r}")
+        extra = {"UH_AGENT_TLS_CERT": cert, "UH_AGENT_TLS_KEY": key}
+        info(f"Node will serve https://{node_url}:{port} using {cert}")
+
+    name = q("Node name", "UH_NODE_NAME", "New Node").strip() or "New Node"
+    memory = q("Node memory (MB)", "UH_NODE_MEMORY", "8192").strip() or "8192"
+    disk = q("Node disk (GB)", "UH_NODE_DISK", "100").strip() or "100"
+
+    # 6. Create the node in the panel (admin)
+    info("Creating node in the panel ...")
     code, data = http_json(
         base + "/api/nodes",
-        {"name": name, "scheme": "http", "host": host, "port": int(port),
+        {"name": name, "scheme": scheme, "host": node_url, "port": int(port),
          "memoryMb": int(memory), "diskGb": int(disk)},
         token=token,
     )
@@ -339,20 +449,69 @@ def install_node():
         die(f"failed to create node on panel ({code}): {data.get('error', data)}")
     node = data["node"]
     env = parse_install_command(node.get("installCommand", ""))
+    env.update(extra)
+    env["UH_AGENT_SCHEME"] = scheme
     if not env.get("UH_CORE_URL"):
         die("panel did not return an install command for the node")
 
-    start_daemon("node-agent", [os.path.join(go_dir, "bin", "uh-agent")], cwd=go_dir, env=env)
-    state = load_state()
-    state.update(
-        node_id=env.get("UH_NODE_ID", node["id"]),
-        agent_token=env.get("UH_AGENT_TOKEN", ""),
-        scheme=env.get("UH_AGENT_SCHEME", "http"),
-        host=host,
-        agent_addr=env.get("UH_AGENT_ADDR", ":" + port),
+    # 7. Connection debug — run agent in foreground briefly and show its logs
+    agent_bin = os.path.join(go_dir, "bin", "uh-agent")
+    info("Starting agent (debug) — showing connection output for a few seconds...")
+    base_env = dict(os.environ)
+    base_env.update(env)
+    p = subprocess.Popen(
+        [agent_bin], cwd=go_dir, env=base_env,
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
     )
-    save_state(state)
-    info(f"Node agent connected to {base}; node {node['name']} ({env.get('UH_NODE_ID', node['id'])}) enrolled and online.")
+    deadline = time.time() + 8
+    lines = []
+    while time.time() < deadline and p.poll() is None:
+        try:
+            line = p.stdout.readline()
+        except Exception:
+            line = ""
+        if not line:
+            time.sleep(0.2)
+            continue
+        line = line.rstrip()
+        if line:
+            lines.append(line)
+            print("  [agent] " + line)
+    p.terminate()
+    try:
+        p.wait(timeout=3)
+    except Exception:
+        p.kill()
+    joined = " ".join(lines).lower()
+    connected = ("enrolled" in joined) or ("reachable" in joined)
+    if connected:
+        info(f"Agent connected: node enrolled with the panel over {scheme}.")
+    else:
+        info("Agent started but no enrollment logged yet — verify the panel host is reachable from this machine.")
+
+    # 8. Ask to start in background
+    print()
+    bg = os.environ.get("UH_START_BG", "").strip().lower()
+    if not bg:
+        if sys.stdin.isatty():
+            try:
+                bg = input("Start node agent in background? [y/N]: ").strip().lower()
+            except (EOFError, KeyboardInterrupt):
+                bg = "n"
+    if bg in ("y", "yes"):
+        start_daemon("node-agent", [agent_bin], cwd=go_dir, env=env)
+        state = load_state()
+        state.update(
+            node_id=env.get("UH_NODE_ID", node["id"]),
+            agent_token=env.get("UH_AGENT_TOKEN", ""),
+            scheme=scheme,
+            host=node_url,
+            agent_addr=env.get("UH_AGENT_ADDR", ":" + port),
+        )
+        save_state(state)
+        info(f"Node agent running in background. Node {node['name']} enrolled at {base} over {scheme}.")
+    else:
+        info("Not starting in background. Start later with the env saved in setup.state.json.")
     return True
 
 

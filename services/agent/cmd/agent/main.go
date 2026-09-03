@@ -44,7 +44,14 @@ func main() {
 	}
 
 	go func() {
-		log.Printf("agent: listening on %s", cfg.ListenAddr)
+		if cfg.TLSCert != "" && cfg.TLSKey != "" {
+			log.Printf("agent: listening on https://%s (TLS)", cfg.ListenAddr)
+			if err := httpSrv.ListenAndServeTLS(cfg.TLSCert, cfg.TLSKey); err != nil && err != http.ErrServerClosed {
+				log.Fatalf("agent: server: %v", err)
+			}
+			return
+		}
+		log.Printf("agent: listening on http://%s", cfg.ListenAddr)
 		if err := httpSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			log.Fatalf("agent: server: %v", err)
 		}

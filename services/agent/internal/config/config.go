@@ -18,6 +18,8 @@ type Config struct {
 	RegToken      string // one-time secret authorizing enrollment with the panel
 	Scheme        string // http | https — how the panel should reach this agent
 	Host          string // FQDN / IP the panel should use to reach this agent
+	TLSCert       string // path to TLS cert (fullchain) when the agent listens on https
+	TLSKey        string // path to TLS private key when the agent listens on https
 	PollSeconds   int
 	ContainerBase string // volume mount base dir for server data
 }
@@ -32,6 +34,8 @@ func Load() Config {
 		RegToken:      getenv("UH_REG_TOKEN", ""),
 		Scheme:        getenv("UH_AGENT_SCHEME", "http"),
 		Host:          getenv("UH_AGENT_HOST", ""),
+		TLSCert:       getenv("UH_AGENT_TLS_CERT", ""),
+		TLSKey:        getenv("UH_AGENT_TLS_KEY", ""),
 		PollSeconds:   atoi(getenv("UH_POLL_INTERVAL", "5")),
 		ContainerBase: getenv("UH_CONTAINER_BASE", "/tmp/uptimehost/data"),
 	}
