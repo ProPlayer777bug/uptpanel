@@ -1,0 +1,26 @@
+# UptimeHost reference deployment. In production the in-memory adapter is
+# replaced by PostgreSQL + Redis and the Go agent runs on each node.
+version: "3.9"
+
+services:
+  api:
+    build:
+      context: ../apps/api
+    ports:
+      - "8787:8787"
+    environment:
+      PORT: 8787
+      UH_DB_FILE: /data/db.json
+    volumes:
+      - uh-data:/data
+    restart: unless-stopped
+
+  # Production stores (uncomment when wiring the persistence adapter):
+  # postgres:
+  #   image: postgres:16
+  #   environment: { POSTGRES_PASSWORD: changeme }
+  # redis:
+  #   image: redis:7
+
+volumes:
+  uh-data:

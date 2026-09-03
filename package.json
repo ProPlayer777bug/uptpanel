@@ -1,0 +1,14 @@
+{
+  "name": "uptimehost",
+  "private": true,
+  "version": "0.1.0",
+  "description": "UptimeHost — next-generation server infrastructure platform",
+  "scripts": {
+    "dev:api": "npm --prefix apps/api run dev",
+    "dev:web": "npm --prefix apps/web run dev",
+    "build": "npm --prefix apps/web run build",
+    "typecheck": "npm --prefix apps/api run typecheck && npm --prefix apps/web run typecheck",
+    "start:api": "npm --prefix apps/api run start"
+  },
+  "workspaces": ["apps/*", "packages/*"]
+}

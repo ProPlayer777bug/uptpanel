@@ -1,0 +1,35 @@
+# Dependencies
+node_modules/
+
+# Builds
+dist/
+build/
+*.tsbuildinfo
+
+# Runtime / local data (secrets, DB, service state)
+.uh-data/
+setup.state.json
+*.pid
+*.log
+
+# Go
+services/agent/bin/
+services/agent/uh-agent
+
+# Python
+__pycache__/
+*.pyc
+
+# Env / secrets
+.env
+.env.local
+*.pem
+*.key
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Editor
+.vscode/
+.idea/
