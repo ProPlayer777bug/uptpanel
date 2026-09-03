@@ -118,11 +118,14 @@ func (s *Server) handleSystem(w http.ResponseWriter, r *http.Request) {
 
 	pingErr := s.dm.Ping(ctx)
 	resp := map[string]any{
-		"id":          os.Getenv("UH_NODE_ID"),
-		"version":     "0.1.0",
-		"online":      true,
+		"id":            os.Getenv("UH_NODE_ID"),
+		"version":       "0.1.0",
+		"online":        true,
 		"dockerHealthy": pingErr == nil,
-		"reachableAt": time.Now().UnixMilli(),
+		"reachableAt":   time.Now().UnixMilli(),
+	}
+	if stats, err := ReadHostStats(); err == nil {
+		resp["host"] = stats
 	}
 	if pingErr == nil {
 		resp["containers"] = 0

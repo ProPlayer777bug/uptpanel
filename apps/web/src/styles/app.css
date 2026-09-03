@@ -566,3 +566,23 @@ html[data-theme='dark'] .code-block { color: #9dd1a5; }
 .select-row .cell-main { font-weight: 600; font-size: 13px; }
 .select-row .cell-sub { color: var(--text-3); font-size: 12px; }
 
+
+/* ============================================================
+   Node management layout (NodeDetail)
+   ============================================================ */
+.node-layout { display: grid; grid-template-columns: 215px 1fr; gap: 16px; align-items: start; }
+.node-nav { padding: 8px; position: sticky; top: 64px; display: flex; flex-direction: column; gap: 2px; max-height: calc(100vh - 90px); overflow-y: auto; }
+.node-nav-item {
+  display: flex; align-items: center; gap: 9px; width: 100%; text-align: left;
+  padding: 7px 10px; font-size: 13px; font-weight: 500; color: var(--text-2);
+  background: transparent; border: none; border-radius: var(--r-md); cursor: pointer;
+  transition: background var(--speed), color var(--speed);
+}
+.node-nav-item:hover { background: var(--surface-2); color: var(--text); }
+.node-nav-item.active { background: var(--accent-soft); color: var(--accent-strong); font-weight: 600; }
+.node-body { min-width: 0; }
+.node-body .card + .card { margin-top: 16px; }
+@media (max-width: 900px) {
+  .node-layout { grid-template-columns: 1fr; }
+  .node-nav { position: static; max-height: none; flex-direction: row; flex-wrap: wrap; }
+}

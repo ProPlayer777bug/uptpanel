@@ -501,6 +501,173 @@ app.post('/api/nodes', async (req, reply) => {
   return reply.code(201).send({ ok: true, node: withHealth(node) })
 })
 
+// Update node configuration (general settings, resources, server limits,
+// allocation strategy, Docker/images, dirs, SFTP, overcommit, etc.). Only the
+// provided fields are changed; everything else is left as-is.
+app.patch('/api/nodes/:id', async (req, reply) => {
+  const user = me(req)
+  if (!user) return reply.code(401).send({ ok: false, error: 'UNAUTHENTICATED' })
+  if (!can(user, 'admin')) return reply.code(403).send({ ok: false, error: 'FORBIDDEN' })
+  const { id } = req.params as any
+  const node = store.db.nodes.find((n) => n.id === id)
+  if (!node) return reply.code(404).send({ ok: false, error: 'NODE_NOT_FOUND' })
+  const b = (req.body || {}) as any
+  const string = (v: any) => (v === undefined ? undefined : String(v).trim())
+  const bool = (v: any) => (v === undefined ? undefined : !!v)
+  const int = (v: any) => (v === '' || v === undefined || v === null ? undefined : Number(v))
+
+  if (string(b.name) !== undefined) node.name = string(b.name)
+  if (string(b.description) !== undefined) node.description = string(b.description)
+  if (string(b.locationId) !== undefined) node.locationId = b.locationId
+  if (string(b.fqdn) !== undefined) node.host = string(b.fqdn)
+  if (int(b.port) !== undefined) node.port = int(b.port)
+  if (string(b.timezone) !== undefined) node.timezone = string(b.timezone)
+
+  if (bool(b.overcommit) !== undefined) node.overcommit = bool(b.overcommit)
+  if (int(b.memoryMb) !== undefined) node.memoryMb = int(b.memoryMb)
+  if (int(b.diskGb) !== undefined) node.diskGb = int(b.diskGb)
+
+  // Allocation strategy and resource plan.
+  const strategy = string(b.allocationStrategy)
+  if ([undefined, 'least_used', 'most_available', 'round_robin', 'manual'].includes(strategy)) {
+    if (strategy !== undefined) node.allocationStrategy = strategy
+  }
+  if (int(b.swapMb) !== undefined) node.swapMb = int(b.swapMb)
+  if (int(b.overcommitCpu) !== undefined) node.overcommitCpu = int(b.overcommitCpu)
+  if (int(b.overcommitMemory) !== undefined) node.overcommitMemory = int(b.overcommitMemory)
+  if (int(b.overcommitDisk) !== undefined) node.overcommitDisk = int(b.overcommitDisk)
+
+  // Server limits (independent of physical resources).
+  const limits = node.serverLimits || (node.serverLimits = {})
+  const limInt = (k: string) => { const v = int(b[k]); if (v !== undefined) limits[k] = v }
+  limInt('maxServers')
+  limInt('maxCpuPercent')
+  limInt('maxRamMb')
+  limInt('maxDiskGb')
+  limInt('maxBackups')
+  limInt('maxDatabases')
+
+  const cfg = node.config || (node.config = {})
+  const cfgStr = (k: string) => { const v = string(b[k]); if (v !== undefined) cfg[k] = v }
+  const cfgInt = (k: string) => { const v = int(b[k]); if (v !== undefined) cfg[k] = v }
+  cfgStr('defaultImage')
+  cfgStr('defaultStartup')
+  cfgStr('defaultDirectory')
+  cfgInt('defaultStopTimeout')
+  cfgStr('defaultRestartPolicy')
+  cfgStr('dataDir')
+  cfgStr('backupDir')
+  cfgStr('tempDir')
+  cfgStr('logsDir')
+  cfgStr('networkName')
+  cfgInt('maxConcurrentBackups')
+  cfgInt('backupBandwidth')
+  cfgInt('sftpPort')
+  cfgStr('dockerImage')
+  cfgInt('dockerNetwork')
+  if (Array.isArray(b.images)) cfg.images = b.images.map(String).filter(Boolean)
+  if (bool(b.preventNew) !== undefined) cfg.preventNew = bool(b.preventNew)
+  if (bool(b.preventMigrations) !== undefined) cfg.preventMigrations = bool(b.preventMigrations)
+  if (bool(b.preventAuto) !== undefined) cfg.preventAuto = bool(b.preventAuto)
+
+  if (bool(b.dockerStatus) !== undefined) node.dockerStatus = bool(b.dockerStatus)
+  if (string(b.storageDriver) !== undefined) node.storageDriver = string(b.storageDriver)
+  if (bool(b.sftpStatus) !== undefined) node.sftpStatus = bool(b.sftpStatus)
+  if (int(b.imageMaxSizeMb) !== undefined) node.imageMaxSizeMb = int(b.imageMaxSizeMb)
+
+  // Security: allowed panel IPs (array) and TLS enforcement.
+  if (Array.isArray(b.allowedPanelIps)) node.allowedPanelIps = b.allowedPanelIps.map(String).filter(Boolean)
+  if (bool(b.tlsEnabled) !== undefined) node.tlsEnabled = bool(b.tlsEnabled)
+
+  node.agentUrl = buildAgentUrl(node)
+  node.installCommand = buildInstallCommand(node)
+  store.persist()
+  audit(store, user.name, 'UPDATE_NODE', `node:${node.name}`)
+  await refreshNode(node)
+  reconcileServers(node)
+  return { ok: true, node: withHealth(node) }
+})
+
+// ---------------------------------------------------------------------------
+// Node allocations — IP/port ranges available for server assignment
+// ---------------------------------------------------------------------------
+app.get('/api/nodes/:id/allocations', async (req, reply) => {
+  const user = me(req)
+  if (!user) return reply.code(401).send({ ok: false, error: 'UNAUTHENTICATED' })
+  if (!can(user, 'admin')) return reply.code(403).send({ ok: false, error: 'FORBIDDEN' })
+  const { id } = req.params as any
+  const node = store.db.nodes.find((n) => n.id === id)
+  if (!node) return reply.code(404).send({ ok: false, error: 'NODE_NOT_FOUND' })
+  return { ok: true, allocations: node.allocations || [], primaryId: node.primaryAllocationId }
+})
+
+// Create allocation(s). Supports a single {ip, port} or a bulk {ip, startPort,
+// endPort}. Returns the created allocation set.
+app.post('/api/nodes/:id/allocations', async (req, reply) => {
+  const user = me(req)
+  if (!user) return reply.code(401).send({ ok: false, error: 'UNAUTHENTICATED' })
+  if (!can(user, 'admin')) return reply.code(403).send({ ok: false, error: 'FORBIDDEN' })
+  const { id } = req.params as any
+  const node = store.db.nodes.find((n) => n.id === id)
+  if (!node) return reply.code(404).send({ ok: false, error: 'NODE_NOT_FOUND' })
+  const b = (req.body || {}) as any
+  node.allocations = node.allocations || []
+  const created: any[] = []
+  const addOne = (ip: string, port: number) => {
+    if (node.allocations.some((a: any) => a.ip === ip && a.port === port)) return null
+    const alloc = { id: nanoid(10), ip, port, ...(node.allocations.length === 0 ? { primary: true, primaryId: true } : {}) }
+    node.allocations.push(alloc)
+    if (node.allocations.length === 1) node.primaryAllocationId = alloc.id
+    return alloc
+  }
+  if (b.total > 1 && b.startPort && b.endPort) {
+    const ip = String(b.ip || node.host || '0.0.0.0')
+    const start = Number(b.startPort); const end = Number(b.endPort)
+    for (let p = start; p <= end; p++) { const a = addOne(ip, p); if (a) created.push(a) }
+  } else {
+    const a = addOne(String(b.ip || node.host || '0.0.0.0'), Number(b.port))
+    if (a) created.push(a)
+  }
+  store.persist()
+  audit(store, user.name, 'ALLOCATION_ADD', `node:${node.name} (+${created.length})`)
+  return { ok: true, allocations: node.allocations, created: created.length }
+})
+
+app.delete('/api/nodes/:id/allocations/:allocId', async (req, reply) => {
+  const user = me(req)
+  if (!user) return reply.code(401).send({ ok: false, error: 'UNAUTHENTICATED' })
+  if (!can(user, 'admin')) return reply.code(403).send({ ok: false, error: 'FORBIDDEN' })
+  const { id, allocId } = req.params as any
+  const node = store.db.nodes.find((n) => n.id === id)
+  if (!node) return reply.code(404).send({ ok: false, error: 'NODE_NOT_FOUND' })
+  const inUse = store.db.servers.some((s: any) => s.nodeId === id && (s.allocations || []).some((a: any) => a.id === allocId))
+  if (inUse) return reply.code(409).send({ ok: false, error: 'ALLOCATION_IN_USE' })
+  const wasPrimary = node.primaryAllocationId === allocId
+  node.allocations = (node.allocations || []).filter((a: any) => a.id !== allocId)
+  if (wasPrimary) {
+    node.primaryAllocationId = node.allocations[0]?.id || null
+    node.allocations = node.allocations.map((a: any, i: number) => ({ ...a, primary: i === 0 }))
+  }
+  store.persist()
+  audit(store, user.name, 'ALLOCATION_REMOVE', `node:${node.name}`)
+  return { ok: true, allocations: node.allocations }
+})
+
+app.post('/api/nodes/:id/allocations/:allocId/primary', async (req, reply) => {
+  const user = me(req)
+  if (!user) return reply.code(401).send({ ok: false, error: 'UNAUTHENTICATED' })
+  if (!can(user, 'admin')) return reply.code(403).send({ ok: false, error: 'FORBIDDEN' })
+  const { id, allocId } = req.params as any
+  const node = store.db.nodes.find((n) => n.id === id)
+  if (!node || !(node.allocations || []).some((a: any) => a.id === allocId)) return reply.code(404).send({ ok: false, error: 'ALLOCATION_NOT_FOUND' })
+  node.primaryAllocationId = allocId
+  node.allocations = node.allocations.map((a: any) => ({ ...a, primary: a.id === allocId }))
+  store.persist()
+  audit(store, user.name, 'ALLOCATION_PRIMARY', `node:${node.name}`)
+  return { ok: true, allocations: node.allocations }
+})
+
+
 app.get('/api/nodes/:id', async (req, reply) => {
   const user = me(req)
   if (!user) return reply.code(401).send({ ok: false, error: 'UNAUTHENTICATED' })
@@ -652,10 +819,30 @@ async function refreshNode(node: any) {
     node.lastSeen = Date.now()
     node.dockerHealthy = !!info.dockerHealthy
     node.agentVersion = info.version
-    node.cpuPercent = info.cpuPercent
-    node.memoryPercent = info.memoryPercent
-    node.diskPercent = info.diskPercent
     node.containerCount = info.containers ?? node.containerCount
+    if (info.host) {
+      node.hostStats = {
+        cpuPercent: info.host.cpuPercent,
+        memoryBytes: info.host.memoryBytes,
+        memoryUsed: info.host.memoryUsed,
+        memoryPercent: info.host.memoryPercent,
+        diskBytes: info.host.diskBytes,
+        diskUsed: info.host.diskUsed,
+        diskPercent: info.host.diskPercent,
+        load1: info.host.load1,
+        load5: info.host.load5,
+        load15: info.host.load15,
+        uptimeSec: info.host.uptimeSec,
+        os: info.host.os,
+        kernel: info.host.kernel,
+        cpuCores: info.host.cpuCores,
+        netRxBytes: info.host.netRxBytes,
+        netTxBytes: info.host.netTxBytes,
+      }
+      node.cpuPercent = info.host.cpuPercent
+      node.memoryPercent = info.host.memoryPercent
+      node.diskPercent = info.host.diskPercent
+    }
     node.health = { reachedAt: info.reachableAt, containers: info.containers, dockerHealthy: info.dockerHealthy }
     node.status = nodeStatus(node)
   } catch {

@@ -68,6 +68,71 @@ export interface Node {
   // Port range for automatic allocation (e.g., 25565-25597)
   portRangeStart?: number
   portRangeEnd?: number
+  // Runtime live host statistics reported by the agent's ping.
+  cpuPercent?: number
+  memoryPercent?: number
+  diskPercent?: number
+  containerCount?: number
+  hostStats?: {
+    cpuPercent: number
+    memoryBytes: number
+    memoryUsed: number
+    memoryPercent: number
+    diskBytes: number
+    diskUsed: number
+    diskPercent: number
+    load1: number
+    load5: number
+    load15: number
+    uptimeSec: number
+    os: string
+    kernel: string
+    cpuCores: number
+    netRxBytes: number
+    netTxBytes: number
+  }
+  description?: string
+  timezone?: string
+  swapMb?: number
+  overcommitCpu?: number
+  overcommitMemory?: number
+  overcommitDisk?: number
+  allocationStrategy?: 'least_used' | 'most_available' | 'round_robin' | 'manual'
+  serverLimits?: {
+    maxServers?: number
+    maxCpuPercent?: number
+    maxRamMb?: number
+    maxDiskGb?: number
+    maxBackups?: number
+    maxDatabases?: number
+  }
+  config?: {
+    defaultImage?: string
+    defaultStartup?: string
+    defaultDirectory?: string
+    defaultStopTimeout?: number
+    defaultRestartPolicy?: string
+    dataDir?: string
+    backupDir?: string
+    tempDir?: string
+    logsDir?: string
+    networkName?: string
+    maxConcurrentBackups?: number
+    backupBandwidth?: number
+    sftpPort?: number
+    images?: string[]
+    preventNew?: boolean
+    preventMigrations?: boolean
+    preventAuto?: boolean
+  }
+  dockerStatus?: boolean
+  storageDriver?: string
+  sftpStatus?: boolean
+  imageMaxSizeMb?: number
+  allowedPanelIps?: string[]
+  tlsEnabled?: boolean
+  allocations?: { id: string; ip: string; port: number; primary?: boolean }[]
+  primaryAllocationId?: string | null
 }
 
 export interface Allocation {
