@@ -443,7 +443,7 @@ def install_node():
     if not base:
         die("panel URL is required")
     if not base.startswith(("http://", "https://")):
-        base = "http://" + base
+        base = "https://" + base
     base = base.rstrip("/")
 
     # 2. Panel admin credentials (login = first connection debug)

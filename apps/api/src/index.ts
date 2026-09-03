@@ -285,9 +285,11 @@ function defaultHost(url: string | undefined, scheme: string): string {
 // path (/etc/uptimehost/agent.env), then installs/starts a systemd service
 // (restarting it if already running; nohup fallback where systemd is absent).
 function buildInstallCommand(node: any): string {
-  const up = process.env.UH_PANEL_URL || `http://${defaultHost(node.agentUrl, node.scheme) || 'localhost'}:8081`
-  const base = up.replace(/\/$/, '')
-  const regUrl = `${base}/api/nodes/register`
+  // UH_CORE_URL is where the AGENT talks back to the PANEL. It must be the
+  // panel's own register endpoint (reachable from the node) — NOT the node's
+  // address. Operators set UH_PANEL_URL to the public panel API base.
+  const panel = (process.env.UH_PANEL_URL || '').replace(/\/$/, '')
+  const regUrl = panel ? `${panel}/api/nodes/register` : `${node.agentUrl}/api/nodes/register`
   const id = node.id
   const regToken = node.registrationToken
   const port = node.port
@@ -295,15 +297,34 @@ function buildInstallCommand(node: any): string {
   const scheme = node.scheme || 'http'
   const host = node.host || 'localhost'
   const repo = 'https://github.com/ProPlayer777bug/uptpanel.git'
+
+  // For https nodes the agent needs a TLS cert + key. The command provisions a
+  // self-signed cert so the listener actually serves TLS; the panel trusts it
+  // via its dev-only UH_AGENT_INSECURE=1 override (real deployments should
+  // supply a proper cert/key instead).
+  const tlsProvision = scheme === 'https'
+    ? [
+        `CERT=/etc/uptimehost/server.crt`,
+        `KEY=/etc/uptimehost/server.key`,
+        `openssl req -x509 -newkey rsa:2048 -nodes -days 3650 \\`,
+        `  -keyout "$KEY" -out "$CERT" -subj "/CN=${host}" >/dev/null 2>&1 || true`,
+      ]
+    : []
+  const tlsEnv = tlsProvision.length
+    ? [`UH_AGENT_TLS_CERT=/etc/uptimehost/server.crt`, `UH_AGENT_TLS_KEY=/etc/uptimehost/server.key`]
+    : []
+
   return [
-    `# One-command UptimeHost node install. Requires: git + go.`,
+    `# One-command UptimeHost node install. Requires: git + go (and openssl for https).`,
     `# Paste on the node, then the agent configures + starts itself (idempotent: re-running restarts it).`,
+    `# Registers the node back to the panel at ${regUrl}.`,
     `bash -s <<'UH'`,
     `set -e`,
     `REPO=/tmp/uptimehost-agent`,
     `BIN=/usr/local/bin/uh-agent`,
     `ENVF=/etc/uptimehost/agent.env`,
     `mkdir -p /etc/uptimehost /var/lib/uptimehost/data`,
+    ...tlsProvision,
     `if [ ! -d "$REPO/.git" ]; then git clone -q --depth 1 ${repo} "$REPO"; else (cd "$REPO" && git fetch -q origin && git reset -q --hard origin/main); fi`,
     `(cd "$REPO/services/agent" && go build -o "$BIN" ./cmd/agent)`,
     `cat > "$ENVF" <<'ENV'`,
@@ -315,12 +336,14 @@ function buildInstallCommand(node: any): string {
     `UH_AGENT_SCHEME=${scheme}`,
     `UH_AGENT_HOST=${host}`,
     `UH_CONTAINER_BASE=/var/lib/uptimehost/data`,
+    ...tlsEnv,
     `ENV`,
     `if command -v systemctl >/dev/null 2>&1; then`,
     `  cat > /etc/systemd/system/uh-agent.service <<'SVC'`,
     `[Unit]`,
     `Description=UptimeHost Node Agent`,
-    `After=docker.service network-online.target`,
+    `After=network-online.target`,
+    `Wants=network-online.target`,
     `[Service]`,
     `Type=simple`,
     `EnvironmentFile=/etc/uptimehost/agent.env`,
@@ -335,7 +358,7 @@ function buildInstallCommand(node: any): string {
     `  systemctl restart uh-agent`,
     `else`,
     `  pkill -f uh-agent >/dev/null 2>&1 || true`,
-    `  nohup sh -c 'set -a; . \${ENVF}; set +a; \${BIN}' >/var/log/uh-agent.log 2>&1 &`,
+    `  nohup /bin/sh -c '. "$ENVF"; exec "$BIN"' >/var/log/uh-agent.log 2>&1 &`,
     `fi`,
     `echo "UH-NODE-OK node=${id} scheme=${scheme} host=${host} port=${port}"`,
     `UH`,
