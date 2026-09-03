@@ -11,6 +11,7 @@ export function SettingsTab({ server }: { server: Server }) {
   const [confirm, setConfirm] = useState(false)
   const [deleting, setDeleting] = useState(false)
   const [reinstalling, setReinstalling] = useState(false)
+  const [typedName, setTypedName] = useState('')
 
   const reinstall = async () => {
     if (!window.confirm(`Reinstall ${server.name}? This wipes its files and rebuilds from the image.`)) return
@@ -57,16 +58,29 @@ export function SettingsTab({ server }: { server: Server }) {
           <p className="sm text-2 mb-3">Reinstall wipes the server's files and rebuilds it from the image. Deleting removes the container, files and all associated data permanently.</p>
           <div className="flex gap-2">
             <button className="btn" onClick={reinstall} disabled={reinstalling}><Icon name="restart" size={14} /> {reinstalling ? 'Reinstalling…' : 'Reinstall'}</button>
-            <button className="btn danger" onClick={() => setConfirm(true)}><Icon name="trash" size={14} /> Delete server</button>
+            <button className="btn danger" onClick={() => { setTypedName(''); setConfirm(true) }}><Icon name="trash" size={14} /> Delete server</button>
           </div>
         </div>
       </div>
 
-      <Modal open={confirm} onClose={() => setConfirm(false)} title="Delete server?" width={420}>
-        <p className="sm text-2">Permanently delete <b>{server.name}</b> and its container?</p>
+      <Modal open={confirm} onClose={() => setConfirm(false)} title="Delete server?" width={440}>
+        <p className="sm text-2 mb-3">
+          Permanently delete <b>{server.name}</b> and its container, files and data. This cannot be undone.
+          To confirm, type the server name <b className="mono">{server.name}</b> below.
+        </p>
+        <div className="field">
+          <input
+            className="input mono"
+            placeholder={server.name}
+            value={typedName}
+            onChange={(e) => setTypedName(e.target.value)}
+          />
+        </div>
         <div className="actions">
           <button className="btn" onClick={() => setConfirm(false)}>Cancel</button>
-          <button className="btn danger" onClick={remove} disabled={deleting}>{deleting ? 'Deleting…' : 'Delete permanently'}</button>
+          <button className="btn danger" onClick={remove} disabled={deleting || typedName !== server.name}>
+            {deleting ? 'Deleting…' : 'Delete permanently'}
+          </button>
         </div>
       </Modal>
     </div>
