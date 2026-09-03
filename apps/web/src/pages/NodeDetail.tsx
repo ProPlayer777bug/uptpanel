@@ -223,7 +223,7 @@ function General({ node, onSaved }: { node: Node; onSaved: () => void }) {
     fqdn: node.host || '', port: node.port, timezone: node.timezone || '',
   })
   const [saving, setSaving] = useState(false)
-  const { data: locs } = usePoll<any>(async () => api.get('/locations'), [], 0)
+  const { data: locs } = usePoll<any>(async () => api.get('/locations'), [], 60000)
   useEffect(() => { reset({ name: node.name, description: node.description || '', locationId: node.locationId || '', fqdn: node.host || '', port: node.port, timezone: node.timezone || '' }) }, [node.id])
   useEffect(() => { if (!form.fqdn && node.host) set('fqdn', node.host) }, [])
   const save = async () => {

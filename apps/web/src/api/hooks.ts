@@ -25,8 +25,13 @@ export function usePoll<T>(fetcher: () => Promise<T>, deps: unknown[] = [], inte
       }
     }
     run()
-    const t = setInterval(run, interval)
-    return () => { alive = false; clearInterval(t) }
+    // A non-positive interval means "fetch once", never poll. A bare
+    // setInterval(fn, 0) would hammer the API and blow past rate limits.
+    if (interval > 0) {
+      const t = setInterval(run, interval)
+      return () => { alive = false; clearInterval(t) }
+    }
+    return () => { alive = false }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [depsKey, interval])
 
