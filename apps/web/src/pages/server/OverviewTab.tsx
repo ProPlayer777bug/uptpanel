@@ -31,9 +31,9 @@ export function OverviewTab({ server }: { server: Server }) {
         <PStatBlock
           icon="cpu" label="CPU"
           value={cpu >= 0.05 ? `${cpu}%` : '0%'}
-          sub={`${server.cpuPercent}% cap`}
+          sub={`/ ${server.cpuPercent}% limit`}
           iconCls="cyan" barColor="var(--cyan-strong)"
-          barPct={cpu}
+          barPct={Math.min(100, (cpu / (server.cpuPercent || 100)) * 100)}
         />
         <PStatBlock
           icon="down" label="Memory"
@@ -64,7 +64,7 @@ export function OverviewTab({ server }: { server: Server }) {
           <div className="card mb-4">
             <div className="card-h">Resource Usage</div>
             <div className="card-b" style={{ display: 'grid', gap: 16 }}>
-              <MetricBar label="CPU" value={stats.cpuPercent ?? 0} max={100} color="var(--cyan-strong)" display={`${stats.cpuPercent != null ? cpu.toFixed(2) : 0}%`} />
+              <MetricBar label="CPU" value={cpu} max={server.cpuPercent || 100} color="var(--cyan-strong)" display={stats.cpuPercent != null ? `${cpu.toFixed(2)} / ${server.cpuPercent}%` : '0%'} />
               <MetricBar label="Memory" value={memPct ?? 0} max={100} color="var(--cyan)" display={`${stats.memoryUsedMb ?? 0} MB / ${server.memoryLimitMb} MB`} />
             </div>
             {stats.error && <div className="card-b thin"><span className="badge red">{stats.error}</span></div>}

@@ -329,7 +329,10 @@ func (c *Client) Stats(ctx context.Context, id string) (*Stats, error) {
 	return st, nil
 }
 
-// cpuPercent derives CPU% from prev->current usage deltas.
+// cpuPercent derives CPU% from prev->current usage deltas, normalized to a
+// single core (0–100 range). On a multi-core host the raw Docker delta can
+// exceed 100 %; dividing by the number of cores gives a percentage that maps
+// cleanly to the user's configured CPU cap (e.g. 200 %).
 func cpuPercent(s *types.StatsJSON) float64 {
 	if s == nil || s.CPUStats.SystemUsage == 0 {
 		return 0
@@ -344,12 +347,12 @@ func cpuPercent(s *types.StatsJSON) float64 {
 	if cores == 0 {
 		cores = 1
 	}
-	pct := (float64(curTotal-prevTotal) / sysDelta) * cores * 100
+	pct := (float64(curTotal-prevTotal) / sysDelta) * 100
 	if pct < 0 {
 		pct = 0
 	}
-	if pct > 100*cores {
-		pct = 100 * cores
+	if pct > 100 {
+		pct = 100
 	}
 	return pct
 }
