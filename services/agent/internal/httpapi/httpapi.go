@@ -335,6 +335,28 @@ func (s *Server) handleServer(w http.ResponseWriter, r *http.Request, id, sub st
 	case strings.HasPrefix(sub, "backups"):
 		s.handleBackups(ctx, w, r, id, sub)
 
+	case sub == "firewall/open" && r.Method == http.MethodPost:
+		var body struct {
+			Port int `json:"port"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		if err := docker.AllowPort(body.Port); err != nil {
+			writeJSON(w, 500, map[string]any{"error": err.Error()})
+			return
+		}
+		writeJSON(w, 200, map[string]any{"ok": true, "action": "allow", "port": body.Port})
+
+	case sub == "firewall/close" && r.Method == http.MethodPost:
+		var body struct {
+			Port int `json:"port"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		if err := docker.DisallowPort(body.Port); err != nil {
+			writeJSON(w, 500, map[string]any{"error": err.Error()})
+			return
+		}
+		writeJSON(w, 200, map[string]any{"ok": true, "action": "delete", "port": body.Port})
+
 	case sub == "reinstall" && r.Method == http.MethodPost:
 		hostRoot := filepath.Join(s.base, id)
 		if err := os.RemoveAll(hostRoot); err != nil {

@@ -381,6 +381,11 @@ app.post('/api/users', async (req, reply) => {
   const normEmail = String(email || '').trim().toLowerCase()
   const ROLES = ['viewer', 'developer', 'operator', 'admin', 'owner']
   const normRole = ROLES.includes(role) ? role : 'viewer'
+  // Only the owner may grant admin/owner rights. A lower admin cannot create
+  // another admin user.
+  if ((normRole === 'admin' || normRole === 'owner') && actor.role !== 'owner') {
+    return reply.code(403).send({ ok: false, error: 'OWNER_ONLY', detail: 'Only the owner can add admin users.' })
+  }
   if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(normEmail)) {
     return reply.code(400).send({ ok: false, error: 'INVALID_EMAIL' })
   }
@@ -429,9 +434,10 @@ app.patch('/api/users/:id', async (req, reply) => {
     if (role !== 'admin' && role !== 'owner' && (u.role === 'admin' || u.role === 'owner')) {
       return reply.code(400).send({ ok: false, error: 'CANNOT_DEMOTE_ADMIN' })
     }
-    // Only the owner can create another owner.
-    if (role === 'owner' && actor.role !== 'owner') {
-      return reply.code(403).send({ ok: false, error: 'OWNER_ONLY' })
+    // Only the owner may grant admin or owner rights; an admin cannot promote
+    // anyone to (or beyond) admin.
+    if ((role === 'admin' || role === 'owner') && actor.role !== 'owner') {
+      return reply.code(403).send({ ok: false, error: 'OWNER_ONLY', detail: 'Only the owner can manage admin users.' })
     }
     u.role = role
   }
@@ -1754,6 +1760,13 @@ app.delete('/api/servers/:id', async (req, reply) => {
   if (!server) return reply.code(404).send({ ok: false, error: 'SERVER_NOT_FOUND' })
   const client = agentFor(store.db.nodes.find((n) => n.id === server.nodeId))
   if (client) {
+    // Close the host firewall for every allocated port before tearing down, so
+    // a deleted server's ports are never left open on the node.
+    for (const a of server.allocations || []) {
+      if (typeof a.port === 'number') {
+        try { await client.closeFirewall(server.id, a.port) } catch { /* best-effort */ }
+      }
+    }
     try { await client.remove(server.id) } catch { /* best-effort */ }
   }
   store.db.servers = store.db.servers.filter((s) => s.id !== id)
@@ -1761,6 +1774,92 @@ app.delete('/api/servers/:id', async (req, reply) => {
   audit(store, user.name, 'DELETE_SERVER', `server:${server.name}`)
   activity(user, 'server', 'info', `Deleted ${server.name}`)
   return { ok: true }
+})
+
+// Attach an extra port/allocation to a server (Ports manager). The port is
+// taken from the node's free pool and its host firewall is opened immediately.
+app.post('/api/servers/:id/allocations', async (req, reply) => {
+  const user = me(req)
+  if (!user) return reply.code(401).send({ ok: false, error: 'UNAUTHENTICATED' })
+  if (!can(user, 'admin')) return reply.code(403).send({ ok: false, error: 'FORBIDDEN' })
+  const { id } = req.params as any
+  const { port, allocationId } = (req.body || {}) as any
+  const server = store.db.servers.find((s) => s.id === id)
+  if (!server) return reply.code(404).send({ ok: false, error: 'SERVER_NOT_FOUND' })
+  const node = store.db.nodes.find((n) => n.id === server.nodeId)
+  if (!node) return reply.code(404).send({ ok: false, error: 'NODE_NOT_FOUND' })
+
+  const used = new Set<number>()
+  for (const s of store.db.servers) {
+    if (s.nodeId === node.id) for (const a of s.allocations || []) used.add(a.port)
+  }
+
+  let alloc: any = null
+  const pool = node.allocations || []
+  if (allocationId) {
+    const cand = pool.find((a: any) => a.id === allocationId)
+    if (!cand || used.has(cand.port)) return reply.code(409).send({ ok: false, error: 'ALLOCATION_UNAVAILABLE' })
+    alloc = { id: cand.id, ip: cand.ip, port: cand.port, proto: cand.proto || 'tcp', alias: cand.alias }
+  } else if (typeof port === 'number' && port >= 1 && port <= 65535) {
+    if (used.has(port)) return reply.code(409).send({ ok: false, error: 'ALLOCATION_UNAVAILABLE', detail: 'That port is already assigned to a server on this node.' })
+    // Prefer an existing free pool entry, else use any free port within the
+    // node's configured range (auto-added to the pool).
+    const cand = pool.find((a: any) => a.port === port)
+    if (cand) {
+      alloc = { id: cand.id, ip: cand.ip, port: cand.port, proto: cand.proto || 'tcp', alias: cand.alias }
+    } else if (node.portRangeStart && node.portRangeEnd && port >= node.portRangeStart && port <= node.portRangeEnd) {
+      const na = { id: nanoid(10), ip: '0.0.0.0', port, proto: 'tcp' }
+      node.allocations = [...pool, na]
+      alloc = { id: na.id, ip: na.ip, port: na.port, proto: 'tcp' }
+    } else {
+      return reply.code(400).send({ ok: false, error: 'PORT_OUT_OF_RANGE', detail: `Port must be within the node range ${node.portRangeStart || '?'}-${node.portRangeEnd || '?'} or already in the allocation pool.` })
+    }
+  } else {
+    return reply.code(400).send({ ok: false, error: 'PORT_OR_ALLOCATION_REQUIRED' })
+  }
+
+  server.allocations = server.allocations || []
+  server.allocations.push({ ...alloc, proto: alloc.proto || 'tcp' })
+  store.persist()
+
+  // Open the host firewall for the new port so external traffic can reach it.
+  const client = agentFor(node)
+  if (client) {
+    try { await client.openFirewall(server.id, alloc.port) } catch (e: any) { /* best-effort */ }
+  }
+
+  hub.to(`srv:${id}`, { type: 'server-update', data: server })
+  activity(user, 'server', 'info', `Added port ${alloc.port} to ${server.name}`, { serverId: id })
+  audit(store, user.name, 'ADD_ALLOCATION', `${server.name}:+${alloc.port}`)
+  return { ok: true, allocations: server.allocations, server: withRelations(server) }
+})
+
+// Detach a port/allocation from a server and close its host firewall.
+app.delete('/api/servers/:id/allocations/:allocId', async (req, reply) => {
+  const user = me(req)
+  if (!user) return reply.code(401).send({ ok: false, error: 'UNAUTHENTICATED' })
+  if (!can(user, 'admin')) return reply.code(403).send({ ok: false, error: 'FORBIDDEN' })
+  const { id, allocId } = req.params as any
+  const server = store.db.servers.find((s) => s.id === id)
+  if (!server) return reply.code(404).send({ ok: false, error: 'SERVER_NOT_FOUND' })
+  const alloc = (server.allocations || []).find((a: any) => a.id === allocId)
+  if (!alloc) return reply.code(404).send({ ok: false, error: 'ALLOCATION_NOT_FOUND' })
+  if ((server.allocations || []).length <= 1) {
+    return reply.code(400).send({ ok: false, error: 'LAST_ALLOCATION', detail: 'A server must keep at least one port.' })
+  }
+  server.allocations = server.allocations.filter((a: any) => a.id !== allocId)
+  store.persist()
+
+  const node = store.db.nodes.find((n) => n.id === server.nodeId)
+  const client = node ? agentFor(node) : null
+  if (client && typeof alloc.port === 'number') {
+    try { await client.closeFirewall(server.id, alloc.port) } catch { /* best-effort */ }
+  }
+
+  hub.to(`srv:${id}`, { type: 'server-update', data: server })
+  activity(user, 'server', 'info', `Removed port ${alloc.port} from ${server.name}`, { serverId: id })
+  audit(store, user.name, 'REMOVE_ALLOCATION', `${server.name}:-${alloc.port}`)
+  return { ok: true, allocations: server.allocations, server: withRelations(server) }
 })
 
 // Reconcile server live state from the node agent's Docker.

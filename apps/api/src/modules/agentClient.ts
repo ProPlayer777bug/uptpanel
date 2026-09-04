@@ -126,6 +126,12 @@ export class AgentClient {
   extractArchive(serverId: string, path: string) {
     return this.req('POST', `/api/servers/${serverId}/files/archive/extract`, { path })
   }
+  openFirewall(serverId: string, port: number) {
+    return this.req('POST', `/api/servers/${serverId}/firewall/open`, { port })
+  }
+  closeFirewall(serverId: string, port: number) {
+    return this.req('POST', `/api/servers/${serverId}/firewall/close`, { port })
+  }
   // Get a file's bytes for browser download.
   downloadFileBytes(serverId: string, path: string): Promise<Response> {
     const url = `${this.baseUrl.replace(/\/$/, '')}/api/servers/${serverId}/files/download?path=${encodeURIComponent(path)}`

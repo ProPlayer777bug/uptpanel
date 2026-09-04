@@ -22,6 +22,7 @@ function fmtDate(ts?: number) {
 
 export function Users() {
   const { user: me } = useApp()
+  const isOwner = me?.role === 'owner'
   const [users, setUsers] = useState<any[]>([])
   const [loading, setLoading] = useState(true)
   const [q, setQ] = useState('')
@@ -134,7 +135,7 @@ export function Users() {
                       <Menu trigger={<span className="nav-icon-btn"><Icon name="dots" size={16} /></span>} align="right" items={[
                         { label: 'View servers', icon: 'server', onClick: () => setDetail(u) },
                         { label: 'Edit', icon: 'gear', onClick: () => setEditing(u) },
-                        { label: u.role === 'owner' || u.role === 'admin' ? 'Disable admin' : 'Enable admin', icon: 'shield', onClick: () => setEditing({ ...u, onlyRole: true }) },
+                        ...(isOwner ? [{ label: u.role === 'owner' || u.role === 'admin' ? 'Disable admin' : 'Enable admin', icon: 'shield', onClick: () => setEditing({ ...u, onlyRole: true }) }] : []),
                         { label: 'Delete', icon: 'trash', danger: true, onClick: () => setDeleting(u) },
                       ]} />
                     </td>
@@ -146,8 +147,8 @@ export function Users() {
         )}
       </div>
 
-      {createOpen && <CreateUserModal onClose={() => setCreateOpen(false)} onSave={handleCreate} />}
-      {editing && <EditUserModal user={editing} onClose={() => setEditing(null)} onSave={handleEdit} />}
+      {createOpen && <CreateUserModal isOwner={isOwner} onClose={() => setCreateOpen(false)} onSave={handleCreate} />}
+      {editing && <EditUserModal isOwner={isOwner} user={editing} onClose={() => setEditing(null)} onSave={handleEdit} />}
       {deleting && (
         <ConfirmDialog
           open={!!deleting}
@@ -159,17 +160,19 @@ export function Users() {
           danger
         />
       )}
-      {detail && <UserDetail user={detail} onClose={() => setDetail(null)} onEdit={(u) => { setDetail(null); setEditing(u) }} onChanged={load} />}
+      {detail && <UserDetail isOwner={isOwner} user={detail} onClose={() => setDetail(null)} onEdit={(u) => { setDetail(null); setEditing(u) }} onChanged={load} />}
     </Shell>
   )
 }
 
-function CreateUserModal({ onClose, onSave }: { onClose: () => void; onSave: (b: any) => Promise<void> }) {
+function CreateUserModal({ isOwner, onClose, onSave }: { isOwner: boolean; onClose: () => void; onSave: (b: any) => Promise<void> }) {
   const [name, setName] = useState('')
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
   const [role, setRole] = useState('viewer')
   const [busy, setBusy] = useState(false)
+
+  const allowedRoles = isOwner ? ROLES : ROLES.filter((r) => r !== 'admin' && r !== 'owner')
 
   const submit = async () => {
     setBusy(true)
@@ -186,9 +189,10 @@ function CreateUserModal({ onClose, onSave }: { onClose: () => void; onSave: (b:
         <Field label="Password"><input className="input" type="password" value={password} onChange={(e) => setPassword(e.target.value)} placeholder="Min 6 characters" /></Field>
         <Field label="Role">
           <select className="input" value={role} onChange={(e) => setRole(e.target.value)}>
-            {ROLES.map((r) => <option key={r} value={r}>{r}</option>)}
+            {allowedRoles.map((r) => <option key={r} value={r}>{r}</option>)}
           </select>
         </Field>
+        {!isOwner && <div className="xs text-3">Only the owner can create admin or owner accounts.</div>}
         <div className="flex justify-end gap-2" style={{ marginTop: 8 }}>
           <Button variant="ghost" onClick={onClose}>Cancel</Button>
           <Button variant="primary" loading={busy} disabled={!name.trim() || !email.trim() || password.length < 6} onClick={submit}>Create user</Button>
@@ -198,7 +202,7 @@ function CreateUserModal({ onClose, onSave }: { onClose: () => void; onSave: (b:
   )
 }
 
-function EditUserModal({ user, onClose, onSave }: { user: any; onClose: () => void; onSave: (b: any) => Promise<void> }) {
+function EditUserModal({ isOwner, user, onClose, onSave }: { isOwner: boolean; user: any; onClose: () => void; onSave: (b: any) => Promise<void> }) {
   const { user: me } = useApp()
   const isSelf = user.id === me?.id
   const [name, setName] = useState(user.name || '')
@@ -207,6 +211,7 @@ function EditUserModal({ user, onClose, onSave }: { user: any; onClose: () => vo
   const [role, setRole] = useState(user.role || 'viewer')
   const [busy, setBusy] = useState(false)
   const isApiRole = user.role === 'owner' || user.role === 'admin'
+  const allowedRoles = isOwner ? ROLES : ROLES.filter((r) => r !== 'admin' && r !== 'owner')
 
   const submit = async () => {
     setBusy(true)
@@ -230,7 +235,7 @@ function EditUserModal({ user, onClose, onSave }: { user: any; onClose: () => vo
         <Field label="Password {isSelf ? '' : '(leave blank to keep)'}"><input className="input" type="password" value={password} onChange={(e) => setPassword(e.target.value)} placeholder={isSelf ? 'New password' : 'Only set to change'} autoComplete="new-password" /></Field>
         <Field label="Role">
           <select className="input" value={role} onChange={(e) => setRole(e.target.value)} disabled={user.onlyRole}>
-            {ROLES.map((r) => <option key={r} value={r}>{r}</option>)}
+            {allowedRoles.map((r) => <option key={r} value={r}>{r}</option>)}
           </select>
         </Field>
         <div className="flex justify-end gap-2" style={{ marginTop: 8 }}>
@@ -242,7 +247,7 @@ function EditUserModal({ user, onClose, onSave }: { user: any; onClose: () => vo
   )
 }
 
-function UserDetail({ user, onClose, onEdit, onChanged }: { user: any; onClose: () => void; onEdit: (u: any) => void; onChanged: () => void }) {
+function UserDetail({ isOwner, user, onClose, onEdit, onChanged }: { isOwner: boolean; user: any; onClose: () => void; onEdit: (u: any) => void; onChanged: () => void }) {
   const [servers, setServers] = useState<any[]>([])
   const [loading, setLoading] = useState(true)
 
@@ -273,9 +278,11 @@ function UserDetail({ user, onClose, onEdit, onChanged }: { user: any; onClose: 
               <span className={`badge ${user.role === 'owner' || user.role === 'admin' ? 'cyan' : 'gray'} xs`}>{user.role}</span>
             </div>
           </div>
-          <Button variant={user.role === 'owner' || user.role === 'admin' ? 'subtle' : 'primary'} size="sm" icon="shield" onClick={toggleAdmin}>
-            {user.role === 'owner' || user.role === 'admin' ? 'Disable admin' : 'Enable admin'}
-          </Button>
+          {isOwner && (
+            <Button variant={user.role === 'owner' || user.role === 'admin' ? 'subtle' : 'primary'} size="sm" icon="shield" onClick={toggleAdmin}>
+              {user.role === 'owner' || user.role === 'admin' ? 'Disable admin' : 'Enable admin'}
+            </Button>
+          )}
           <Button variant="ghost" size="sm" icon="gear" onClick={() => onEdit(user)}>Edit</Button>
         </div>
 

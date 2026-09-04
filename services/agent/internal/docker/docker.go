@@ -160,6 +160,17 @@ func (c *Client) CreateContainer(ctx context.Context, m Manifest) (string, error
 	if err != nil {
 		return "", fmt.Errorf("container create: %w", err)
 	}
+	// Host networking binds directly to the host, so open the firewall for each
+	// exposed port so external traffic can reach the server.
+	for protoPort := range m.Ports {
+		p, perr := nat.NewPort("tcp", strings.Split(protoPort, "/")[0])
+		if perr != nil {
+			continue
+		}
+		if perr = AllowPort(int(p.Int())); perr != nil {
+			fmt.Printf("[docker] open firewall %s: %v\n", protoPort, perr)
+		}
+	}
 	return resp.ID, nil
 }
 

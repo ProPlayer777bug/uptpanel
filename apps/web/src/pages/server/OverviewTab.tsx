@@ -76,8 +76,8 @@ export function OverviewTab({ server }: { server: Server }) {
             <div className="card-b">
               <InfoRow k="State" v={<StatePill state={server.state} />} />
               <InfoRow k="Blueprint" v={server.blueprint?.name || '—'} />
-              <InfoRow k="Image" v={<div className="mono sm">{server.blueprint?.image}</div>} />
-              <InfoRow k="Startup" v={<div className="mono sm">{server.blueprint?.startup}</div>} />
+              <InfoRow k="Runtime" v={<div className="sm">{friendlyRuntime(server.blueprint?.image)}</div>} />
+              <InfoRow k="Startup" v={<div className="sm">{friendlyStartup(server.blueprint?.startup)}</div>} />
               <InfoRow k="Node" v={server.node?.name || '—'} />
               <InfoRow k="Disk" v={`${server.storageGb} GB`} />
               <InfoRow k="Created" v={new Date(server.createdAt).toLocaleString()} />
@@ -154,6 +154,24 @@ function MetricBar({ label, value, max, color, display }: { label: string; value
 
 function InfoRow({ k, v }: { k: string; v: any }) {
   return <div className="info-row"><span className="k">{k}</span><span>{v}</span></div>
+}
+
+// Present the runtime image to end users without exposing the underlying
+// engine registry (e.g. ghcr.io/pterodactyl/yolks:java_21 -> "Java 21 runtime").
+function friendlyRuntime(img: string | undefined): string {
+  if (!img) return '—'
+  const m = /(?:java|openjdk)[_-]?(\d+)/i.exec(img)
+  if (m) return `Java ${m[1]} runtime`
+  const tag = img.split(':').pop()
+  if (tag) return tag.charAt(0).toUpperCase() + tag.slice(1)
+  return img
+}
+
+// Present the launch line without the raw java flags/registry detail.
+function friendlyStartup(startup: string | undefined): string {
+  if (!startup) return '—'
+  if (/java\b/.test(startup)) return 'Minecraft runtime launcher'
+  return startup.trim().split(/\s+/)[0] || '—'
 }
 
 function ProvisionView({ progress }: { progress: Progress | null }) {

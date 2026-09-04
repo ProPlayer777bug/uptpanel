@@ -38,8 +38,8 @@ export function SettingsTab({ server }: { server: Server }) {
       <div className="card">
         <div className="card-h"><Icon name="gear" size={15} /> Environment & limits</div>
         <div className="card-b">
-          <InfoRow k="Startup" v={<div className="mono sm">{server.blueprint?.startup}</div>} />
-          <InfoRow k="Image" v={<div className="mono sm">{server.blueprint?.image}</div>} />
+          <InfoRow k="Runtime" v={<div className="sm">{friendlyRuntime(server.blueprint?.image)}</div>} />
+          <InfoRow k="Startup" v={<div className="sm">{friendlyStartup(server.blueprint?.startup)}</div>} />
           <InfoRow k="Memory limit" v={<div className="mono sm">{server.memoryLimitMb} MB</div>} />
           <InfoRow k="CPU limit" v={<div className="mono sm">{server.cpuPercent}%</div>} />
           <InfoRow k="Disk" v={<div className="mono sm">{server.storageGb} GB</div>} />
@@ -89,4 +89,19 @@ export function SettingsTab({ server }: { server: Server }) {
 
 function InfoRow({ k, v }: { k: string; v: any }) {
   return <div className="info-row"><span className="k">{k}</span><span>{v}</span></div>
+}
+
+function friendlyRuntime(img: string | undefined): string {
+  if (!img) return '—'
+  const m = /(?:java|openjdk)[_-]?(\d+)/i.exec(img)
+  if (m) return `Java ${m[1]} runtime`
+  const tag = img.split(':').pop()
+  if (tag) return tag.charAt(0).toUpperCase() + tag.slice(1)
+  return img
+}
+
+function friendlyStartup(startup: string | undefined): string {
+  if (!startup) return '—'
+  if (/java\b/.test(startup)) return 'Minecraft runtime launcher'
+  return startup.trim().split(/\s+/)[0] || '—'
 }
