@@ -3,6 +3,7 @@
 package httpapi
 
 import (
+	"archive/zip"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -465,6 +466,40 @@ func resolvePath(hostRoot, inContainerPath string) string {
 	return backup.SafeResolve(hostRoot, inner)
 }
 
+// zipSingleFile zips one regular file into dest, returning bytes written.
+func zipSingleFile(src, dest string) (int64, error) {
+	info, err := os.Stat(src)
+	if err != nil {
+		return 0, err
+	}
+	if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
+		return 0, err
+	}
+	f, err := os.Create(dest)
+	if err != nil {
+		return 0, err
+	}
+	defer f.Close()
+
+	zw := zip.NewWriter(f)
+	hdr := &zip.FileHeader{Name: filepath.Base(src), Method: zip.Deflate}
+	hdr.SetMode(info.Mode().Perm())
+	w, err := zw.CreateHeader(hdr)
+	if err != nil {
+		zw.Close()
+		return 0, err
+	}
+	rc, err := os.Open(src)
+	if err != nil {
+		zw.Close()
+		return 0, err
+	}
+	n, err := io.Copy(w, rc)
+	rc.Close()
+	zw.Close()
+	return n, err
+}
+
 func (s *Server) handleFiles(ctx context.Context, w http.ResponseWriter, r *http.Request, id, sub string) {
 	// Resolve container host path: /home/container<path> -> base dir.
 	hostRoot := filepath.Join(s.base, id)
@@ -506,6 +541,221 @@ func (s *Server) handleFiles(ctx context.Context, w http.ResponseWriter, r *http
 			return
 		}
 		if err := os.WriteFile(target, []byte(body.Content), 0o644); err != nil {
+			writeJSON(w, 500, map[string]any{"error": err.Error()})
+			return
+		}
+		writeJSON(w, 200, map[string]any{"ok": true, "path": body.Path})
+
+	case strings.HasPrefix(sub, "files/download") && r.Method == http.MethodGet:
+		// Serve a file's bytes back to the panel for browser download.
+		info, err := os.Stat(fsPath)
+		if err != nil {
+			writeJSON(w, 404, map[string]any{"error": "download: " + err.Error()})
+			return
+		}
+		if info.IsDir() {
+			writeJSON(w, 400, map[string]any{"error": "cannot download a directory"})
+			return
+		}
+		f, err := os.Open(fsPath)
+		if err != nil {
+			writeJSON(w, 500, map[string]any{"error": err.Error()})
+			return
+		}
+		defer f.Close()
+		w.Header().Set("Content-Disposition", "attachment; filename=\""+filepath.Base(fsPath)+"\"")
+		w.Header().Set("Content-Type", "application/octet-stream")
+		w.Header().Set("Content-Length", fmt.Sprintf("%d", info.Size()))
+		_, _ = io.Copy(w, f)
+
+	case strings.HasPrefix(sub, "files/delete") && r.Method == http.MethodPost:
+		var body struct {
+			Path string `json:"path"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			writeJSON(w, 400, map[string]any{"error": err.Error()})
+			return
+		}
+		if body.Path == "" {
+			writeJSON(w, 400, map[string]any{"error": "path required"})
+			return
+		}
+		target := resolvePath(hostRoot, body.Path)
+		if target == "" {
+			writeJSON(w, 400, map[string]any{"error": "unsafe path"})
+			return
+		}
+		if target == hostRoot {
+			writeJSON(w, 400, map[string]any{"error": "cannot delete server root"})
+			return
+		}
+		info, err := os.Lstat(target)
+		if err != nil {
+			writeJSON(w, 404, map[string]any{"error": "delete: " + err.Error()})
+			return
+		}
+		if info.IsDir() {
+			if err := os.RemoveAll(target); err != nil {
+				writeJSON(w, 500, map[string]any{"error": err.Error()})
+				return
+			}
+		} else if err := os.Remove(target); err != nil {
+			writeJSON(w, 500, map[string]any{"error": err.Error()})
+			return
+		}
+		writeJSON(w, 200, map[string]any{"ok": true, "path": body.Path})
+
+	case strings.HasPrefix(sub, "files/archive/extract") && r.Method == http.MethodPost:
+		// Extract a zip file already present on the node into the current dir.
+		var body struct {
+			Path string `json:"path"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			writeJSON(w, 400, map[string]any{"error": err.Error()})
+			return
+		}
+		if body.Path == "" {
+			writeJSON(w, 400, map[string]any{"error": "path required"})
+			return
+		}
+		src := resolvePath(hostRoot, body.Path)
+		if src == "" {
+			writeJSON(w, 400, map[string]any{"error": "unsafe path"})
+			return
+		}
+		total, err := backup.Extract(src, hostRoot)
+		if err != nil {
+			writeJSON(w, 400, map[string]any{"error": err.Error()})
+			return
+		}
+		writeJSON(w, 200, map[string]any{"ok": true, "bytes": total, "path": body.Path})
+
+	case strings.HasPrefix(sub, "files/archive") && r.Method == http.MethodPost:
+		// Zip a file or directory on the node into a sibling .zip (like backups
+		// but for an arbitrary path). Returns the resulting archive name/size.
+		var body struct {
+			Path string `json:"path"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			writeJSON(w, 400, map[string]any{"error": err.Error()})
+			return
+		}
+		if body.Path == "" {
+			writeJSON(w, 400, map[string]any{"error": "path required"})
+			return
+		}
+		src := resolvePath(hostRoot, body.Path)
+		if src == "" {
+			writeJSON(w, 400, map[string]any{"error": "unsafe path"})
+			return
+		}
+		info, err := os.Stat(src)
+		if err != nil {
+			writeJSON(w, 404, map[string]any{"error": "archive: " + err.Error()})
+			return
+		}
+		zipName := filepath.Base(src) + ".zip"
+		dest := filepath.Join(filepath.Dir(src), zipName)
+		var total int64
+		if info.IsDir() {
+			total, err = backup.Create(src, dest)
+		} else {
+			total, err = zipSingleFile(src, dest)
+		}
+		if err != nil {
+			writeJSON(w, 500, map[string]any{"error": err.Error()})
+			return
+		}
+		writeJSON(w, 200, map[string]any{"ok": true, "file": zipName, "bytes": total, "path": body.Path})
+
+	case strings.HasPrefix(sub, "files/upload") && r.Method == http.MethodPost:
+		// Multipart upload of one or more files into the current directory (q).
+		if err := r.ParseMultipartForm(1 << 30); err != nil {
+			writeJSON(w, 400, map[string]any{"error": "upload: " + err.Error()})
+			return
+		}
+		type saved struct {
+			Name string `json:"name"`
+			Size int64  `json:"size"`
+		}
+		savedFiles := make([]saved, 0)
+		for fname, fhs := range r.MultipartForm.File {
+			for _, fh := range fhs {
+				if err := os.MkdirAll(fsPath, 0o755); err != nil {
+					writeJSON(w, 500, map[string]any{"error": err.Error()})
+					return
+				}
+				target := backup.SafeResolve(fsPath, fname)
+				if target == "" {
+					writeJSON(w, 400, map[string]any{"error": "unsafe upload name: " + fname})
+					return
+				}
+				in, err := fh.Open()
+				if err != nil {
+					writeJSON(w, 500, map[string]any{"error": err.Error()})
+					return
+				}
+				out, err := os.Create(target)
+				if err != nil {
+					in.Close()
+					writeJSON(w, 500, map[string]any{"error": err.Error()})
+					return
+				}
+				n, err := io.Copy(out, in)
+				out.Close()
+				in.Close()
+				if err != nil {
+					writeJSON(w, 500, map[string]any{"error": err.Error()})
+					return
+				}
+				savedFiles = append(savedFiles, saved{Name: fname, Size: n})
+			}
+		}
+		writeJSON(w, 200, map[string]any{"ok": true, "path": q, "files": savedFiles})
+
+	case strings.HasPrefix(sub, "files/rename") && r.Method == http.MethodPost:
+		var body struct {
+			From string `json:"from"`
+			To   string `json:"to"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			writeJSON(w, 400, map[string]any{"error": err.Error()})
+			return
+		}
+		if body.From == "" || body.To == "" {
+			writeJSON(w, 400, map[string]any{"error": "from and to required"})
+			return
+		}
+		src := resolvePath(hostRoot, body.From)
+		dst := resolvePath(hostRoot, body.To)
+		if src == "" || dst == "" {
+			writeJSON(w, 400, map[string]any{"error": "unsafe path"})
+			return
+		}
+		if err := os.Rename(src, dst); err != nil {
+			writeJSON(w, 500, map[string]any{"error": err.Error()})
+			return
+		}
+		writeJSON(w, 200, map[string]any{"ok": true, "path": body.To})
+
+	case strings.HasPrefix(sub, "files/mkdir") && r.Method == http.MethodPost:
+		var body struct {
+			Path string `json:"path"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			writeJSON(w, 400, map[string]any{"error": err.Error()})
+			return
+		}
+		if body.Path == "" {
+			writeJSON(w, 400, map[string]any{"error": "path required"})
+			return
+		}
+		target := resolvePath(hostRoot, body.Path)
+		if target == "" {
+			writeJSON(w, 400, map[string]any{"error": "unsafe path"})
+			return
+		}
+		if err := os.MkdirAll(target, 0o755); err != nil {
 			writeJSON(w, 500, map[string]any{"error": err.Error()})
 			return
 		}

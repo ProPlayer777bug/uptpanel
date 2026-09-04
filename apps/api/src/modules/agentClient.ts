@@ -34,8 +34,8 @@ export interface AgentInfo {
 
 export class AgentClient {
   constructor(
-    private baseUrl: string,
-    private token: string,
+    readonly baseUrl: string,
+    readonly token: string,
     private nodeId: string,
   ) {}
 
@@ -64,7 +64,7 @@ export class AgentClient {
   // verification for local/dev nodes whose daemon runs a self-signed cert.
   // This is an explicit opt-in escape hatch (UH_AGENT_INSECURE=1) and MUST
   // NOT be enabled in production.
-  private async fetchTls(url: string, init: RequestInit): Promise<Response> {
+  async fetchTls(url: string, init: RequestInit): Promise<Response> {
     if (process.env.UH_AGENT_INSECURE === '1') {
       process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0'
     }
@@ -110,6 +110,29 @@ export class AgentClient {
   }
   downloadFile(serverId: string, path: string, url: string) {
     return this.req('POST', `/api/servers/${serverId}/files/download`, { path, url })
+  }
+  deleteFile(serverId: string, path: string) {
+    return this.req('POST', `/api/servers/${serverId}/files/delete`, { path })
+  }
+  renameFile(serverId: string, from: string, to: string) {
+    return this.req('POST', `/api/servers/${serverId}/files/rename`, { from, to })
+  }
+  makeDir(serverId: string, path: string) {
+    return this.req('POST', `/api/servers/${serverId}/files/mkdir`, { path })
+  }
+  archive(serverId: string, path: string) {
+    return this.req<{ ok: boolean; file: string; bytes: number }>('POST', `/api/servers/${serverId}/files/archive`, { path })
+  }
+  extractArchive(serverId: string, path: string) {
+    return this.req('POST', `/api/servers/${serverId}/files/archive/extract`, { path })
+  }
+  // Get a file's bytes for browser download.
+  downloadFileBytes(serverId: string, path: string): Promise<Response> {
+    const url = `${this.baseUrl.replace(/\/$/, '')}/api/servers/${serverId}/files/download?path=${encodeURIComponent(path)}`
+    return this.fetchTls(url, {
+      method: 'GET',
+      headers: { authorization: `Bearer ${this.token}` },
+    })
   }
   containerLogs(serverId: string, tail?: number) {
     return this.req('GET', `/api/servers/${serverId}/logs?tail=${tail || 200}`)

@@ -74,6 +74,7 @@ export default function App() {
         <Route path="/databases" element={<Page><AdminRoute><Databases /></AdminRoute></Page>} />
         <Route path="/auth-providers" element={<Page><AdminRoute><AuthProviders /></AdminRoute></Page>} />
         <Route path="/account" element={<Page><Account /></Page>} />
+        <Route path="/account/api-keys" element={<Page><Account focus="api-keys" /></Page>} />
         <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>
       <ToastHost />

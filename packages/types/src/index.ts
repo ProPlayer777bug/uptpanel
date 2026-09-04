@@ -188,6 +188,8 @@ export interface Server {
   error?: string
   /** Pinned Minecraft version (Minecraft-catalog servers only). */
   mcVersion?: string
+  /** Server software platform (vanilla | paper | purpur | folia). */
+  mcPlatform?: string
   /** Pinned required Java major version (Minecraft-catalog servers only). */
   javaVersion?: number
   /** Extra environment derived from the server's pinned runtime. */

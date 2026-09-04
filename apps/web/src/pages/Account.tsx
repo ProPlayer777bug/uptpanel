@@ -1,13 +1,23 @@
+import { useEffect, useRef } from 'react'
 import { useApp } from '../state/auth'
 import { useTheme } from '../theme/useTheme'
 import { Icon } from '../components/ui'
 import { ApiKeys } from '../components/ApiKeys'
 import { Shell } from '../components/Shell'
 
-export function Account() {
+export function Account({ focus }: { focus?: string }) {
   const { user } = useApp()
   const { mode, applyMode } = useTheme()
   const u = user || { name: '', email: '', role: '', avatarHue: 0, createdAt: 0, id: '' }
+  const apiKeysRef = useRef<HTMLDivElement>(null)
+
+  // When arriving at /account/api-keys, scroll the Application API keys card
+  // into view so the nav item visibly "opens" the right section.
+  useEffect(() => {
+    if (focus === 'api-keys' && apiKeysRef.current) {
+      apiKeysRef.current.scrollIntoView({ behavior: 'smooth', block: 'start' })
+    }
+  }, [focus])
 
   const roleColor: Record<string, string> = { owner: 'amber', admin: 'red', operator: 'blue', developer: 'cyan', viewer: 'gray' }
 
@@ -49,7 +59,7 @@ export function Account() {
         </div>
 
         {/* Application API — account-level keys to manage servers programmatically */}
-        <div className="card" style={{ marginTop: 0 }}>
+        <div className="card" ref={apiKeysRef} style={{ marginTop: 0 }} id="application-api">
           <div className="card-h"><Icon name="key" size={15} /> Application API keys</div>
           <div className="card-b">
             <p className="sub" style={{ marginBottom: 12 }}>

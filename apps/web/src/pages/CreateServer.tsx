@@ -6,13 +6,15 @@ import { Icon, Modal, Spinner, toast } from '../components/ui'
 import { useApp } from '../state/auth'
 import type { Blueprint, Node } from '@uptimehost/types'
 
-type Step = 'node' | 'memory' | 'disk' | 'cpu'
+type Step = 'name' | 'node' | 'memory' | 'disk' | 'cpu' | 'users'
 
 const STEPS: { key: Step; label: string }[] = [
+  { key: 'name', label: 'Name' },
   { key: 'node', label: 'Node' },
   { key: 'memory', label: 'Memory' },
   { key: 'disk', label: 'Disk' },
   { key: 'cpu', label: 'CPU' },
+  { key: 'users', label: 'Users' },
 ]
 
 export function CreateServer({ onClose }: { onClose: () => void }) {
@@ -21,6 +23,7 @@ export function CreateServer({ onClose }: { onClose: () => void }) {
   const { refresh } = useApp()
   const navigate = useNavigate()
   const { data: mc } = usePoll<any>(async () => api.get('/mc/versions'), [], 600000)
+  const { data: usersData, loading: usersLoading } = usePoll<{ users: any[] }>(async () => api.get('/users'), [], 60000)
 
   const online = useMemo(() => nodes.filter((n) => n.status === 'online'), [nodes])
   const [bpId, setBpId] = useState('')
@@ -31,30 +34,45 @@ export function CreateServer({ onClose }: { onClose: () => void }) {
   const [cpuCores, setCpuCores] = useState('')
   const [step, setStep] = useState<Step>('node')
   const [busy, setBusy] = useState(false)
+  const [userQuery, setUserQuery] = useState('')
+  const [selectedUsers, setSelectedUsers] = useState<string[]>([])
+  const [userRoles, setUserRoles] = useState<Record<string, string>>({})
+
+  const users = usersData?.users ?? []
+
+  const filteredUsers = useMemo(() => {
+    const q = userQuery.trim().toLowerCase()
+    if (!q) return users
+    return users.filter(
+      (u) => u.name?.toLowerCase().includes(q) || u.email?.toLowerCase().includes(q),
+    )
+  }, [users, userQuery])
 
   useEffect(() => {
     if (blueprints.length && !bpId) setBpId(blueprints[0].id)
     if (!node && online.length) setNode(online[0])
+    setStep('name')
   }, [blueprints, online, node, bpId])
 
   const bp: Blueprint | undefined = blueprints.find((b) => b.id === bpId)
   const cpuPercent = Math.max(1, Math.round((Number(cpuCores) || 1) * 100))
 
   const canNext =
+    step === 'name' ? name.trim().length > 0 :
     step === 'node' ? !!node && !!bpId :
     step === 'memory' ? (Number(mem) > 0 && (node?.overcommit || Number(mem) <= (node?.remainingMemoryMb ?? Number.MAX_SAFE_INTEGER))) :
     step === 'disk' ? (Number(disk) > 0 && Number(disk) <= (node?.remainingDiskGb ?? Number.MAX_SAFE_INTEGER)) :
     true
 
+  const prev = () => {
+    const i = STEPS.findIndex((s) => s.key === step)
+    if (i > 0) setStep(STEPS[i - 1].key)
+  }
+
   const next = () => {
     const i = STEPS.findIndex((s) => s.key === step)
     if (i < STEPS.length - 1) setStep(STEPS[i + 1].key)
     else create()
-  }
-
-  const prev = () => {
-    const i = STEPS.findIndex((s) => s.key === step)
-    if (i > 0) setStep(STEPS[i - 1].key)
   }
 
   const create = async () => {
@@ -69,10 +87,14 @@ export function CreateServer({ onClose }: { onClose: () => void }) {
         cpuPercent,
         storageGb: Number(disk),
       })
-      toast.ok('Server created — provisioning')
+      const serverId = res.server.id
+      for (const email of selectedUsers) {
+        await api.post(`/servers/${serverId}/access`, { email, role: userRoles[email] || 'viewer' })
+      }
+      toast.ok(selectedUsers.length ? `Server created — added ${selectedUsers.length} user${selectedUsers.length === 1 ? '' : 's'}` : 'Server created — provisioning')
       refresh()
       onClose()
-      navigate(`/servers/${res.server.id}`)
+      navigate(`/servers/${serverId}`)
     } catch (e: any) {
       toast.err(e?.message || 'Failed to create server')
     } finally {
@@ -92,6 +114,30 @@ export function CreateServer({ onClose }: { onClose: () => void }) {
           </div>
         ))}
       </div>
+
+      {step === 'name' && (
+        <div className="grid gap-3">
+          <div className="field">
+            <label>Display name</label>
+            <input
+              className="input"
+              autoFocus
+              placeholder={bp ? `${bp.name} Server` : 'Give your server a name'}
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+              onKeyDown={(e) => { if (e.key === 'Enter' && name.trim() && canNext) next() }}
+            />
+            <span className="xs text-3">This is the name your players will see. You can change it later in the server settings.</span>
+          </div>
+          {bp && (
+            <div className="card subtle p-2">
+              <div className="xs text-3">Template</div>
+              <div className="cell-main">{bp.name}</div>
+              <div className="cell-sub mono xs">{bp.image} · {bp.ports.length} port{bp.ports.length === 1 ? '' : 's'}</div>
+            </div>
+          )}
+        </div>
+      )}
 
       {step === 'node' && (
         <div className="grid gap-3">
@@ -139,11 +185,6 @@ export function CreateServer({ onClose }: { onClose: () => void }) {
                 ))}
               </div>
             )}
-          </div>
-
-          <div className="field">
-            <label>Display name</label>
-            <input className="input" placeholder={bp ? `${bp.name} Server` : 'Server name'} value={name} onChange={(e) => setName(e.target.value)} />
           </div>
         </div>
       )}
@@ -198,6 +239,86 @@ export function CreateServer({ onClose }: { onClose: () => void }) {
             </div>
           </div>
         </>
+      )}
+
+      {step === 'users' && (
+        <div className="grid gap-3">
+          <div className="field">
+            <label>Grant access to users</label>
+            <div className="flex" style={{ gap: 8, alignItems: 'center' }}>
+              <input
+                className="input flex-1"
+                placeholder="Search by name or email…"
+                value={userQuery}
+                onChange={(e) => setUserQuery(e.target.value)}
+              />
+              <Icon name="search" size={16} className="text-3" />
+            </div>
+            <span className="xs text-3">Search existing users and add them to this server. You can invite new users later from the Access tab.</span>
+          </div>
+
+          {selectedUsers.length > 0 && (
+            <div className="flex gap-1" style={{ flexWrap: 'wrap' }}>
+              {selectedUsers.map((email) => {
+                const u = users.find((x) => x.email === email)
+                return (
+                  <span key={email} className="badge blue" style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+                    {u?.name || email}
+                    <button
+                      type="button"
+                      style={{ background: 'none', border: 'none', color: 'inherit', cursor: 'pointer', fontSize: 14, lineHeight: 1, padding: 0 }}
+                      onClick={() => setSelectedUsers((s) => s.filter((e) => e !== email))}
+                      title="Remove"
+                    >×</button>
+                  </span>
+                )
+              })}
+            </div>
+          )}
+
+          <div style={{ maxHeight: 260, overflow: 'auto', borderRadius: 8, border: '1px solid var(--line)' }}>
+            {usersLoading ? (
+              <div className="center" style={{ padding: 24 }}><Spinner size={20} /></div>
+            ) : filteredUsers.length === 0 ? (
+              <div className="center xs text-3" style={{ padding: 24 }}>No users found. Create users from the Users page.</div>
+            ) : (
+              filteredUsers.map((u) => {
+                const checked = selectedUsers.includes(u.email)
+                return (
+                  <div
+                    key={u.email}
+                    className="select-row"
+                    onClick={() =>
+                      setSelectedUsers((s) => (checked ? s.filter((e) => e !== u.email) : [...s, u.email]))
+                    }
+                  >
+                    <div style={{ flex: 1, display: 'flex', alignItems: 'center', gap: 10 }}>
+                      <input type="checkbox" checked={checked} readOnly />
+                      <div>
+                        <div className="cell-main">{u.name}</div>
+                        <div className="cell-sub xs">{u.email} · {u.role}</div>
+                      </div>
+                    </div>
+                    {checked && (
+                      <select
+                        className="select sm"
+                        style={{ width: 120 }}
+                        value={userRoles[u.email] || 'viewer'}
+                        onClick={(e) => e.stopPropagation()}
+                        onChange={(e) => setUserRoles((r) => ({ ...r, [u.email]: e.target.value }))}
+                      >
+                        <option value="viewer">Viewer</option>
+                        <option value="developer">Developer</option>
+                        <option value="operator">Operator</option>
+                        <option value="admin">Admin</option>
+                      </select>
+                    )}
+                  </div>
+                )
+              })
+            )}
+          </div>
+        </div>
       )}
 
       <div className="actions" style={{ marginTop: 20 }}>

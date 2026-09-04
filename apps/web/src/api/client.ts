@@ -53,6 +53,24 @@ export async function downloadBlob(path: string, filename: string): Promise<void
   URL.revokeObjectURL(url)
 }
 
+// Upload files (multipart FormData) to a File Manager endpoint. Unlike the
+// JSON helpers, the browser sets the correct multipart content-type/boundary.
+export async function uploadForm(path: string, form: FormData): Promise<any> {
+  const token = getToken()
+  const res = await fetch(`/api${path}`, {
+    method: 'POST',
+    headers: { authorization: `Bearer ${token}` },
+    body: form,
+  })
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}))
+    const err: any = new Error(data.error || `HTTP ${res.status}`)
+    err.status = res.status
+    throw err
+  }
+  return res.json().catch(() => ({}))
+}
+
 export interface Err extends Error {
   data?: { code?: string; error?: string }
   status?: number

@@ -16,6 +16,7 @@ import { NetworkTab } from './NetworkTab'
 import { AccessTab } from './AccessTab'
 import { ApiTab } from './ApiTab'
 import { SettingsTab } from './SettingsTab'
+import { VersionManager, PluginManager, isMcServer } from './VersionPluginModals'
 
 type Tab = 'overview' | 'console' | 'files' | 'snapshots' | 'backups' | 'schedules' | 'databases' | 'startup' | 'network' | 'access' | 'api' | 'settings'
 const ADMIN_TABS: Tab[] = ['startup', 'network', 'snapshots', 'access', 'api', 'settings', 'databases', 'schedules', 'backups']
@@ -40,6 +41,8 @@ export function ServerWorkspace() {
   const { data, loading } = useServer(id)
   const server = data?.server
   const [tab, setTab] = useState<Tab>('overview')
+  const [showVersions, setShowVersions] = useState(false)
+  const [showPlugins, setShowPlugins] = useState(false)
 
   const perms = server?.permissions || {}
   const role = server?.role
@@ -76,6 +79,12 @@ export function ServerWorkspace() {
             <h1 style={{ fontSize: 20, fontWeight: 600 }}>{server.name}</h1>
             <StatePill state={server.state} pulse />
             <div style={{ flex: 1 }} />
+            {isMcServer(server) && canAdminServer && (
+              <>
+                <button className="btn sm" onClick={() => setShowPlugins(true)}><Icon name="box" size={14} /> Plugins</button>
+                <button className="btn sm" onClick={() => setShowVersions(true)}><Icon name="activity" size={14} /> Version</button>
+              </>
+            )}
             <PowerControls server={server} />
             <Menu trigger={<span className="nav-icon-btn"><Icon name="dots" size={16} /></span>} align="right"
               items={[{ label: 'Copy address', icon: 'copy', onClick: () => navigator.clipboard?.writeText(address) }]}
@@ -107,6 +116,9 @@ export function ServerWorkspace() {
           {tab === 'settings' && <SettingsTab server={server} />}
         </div>
       </div>
+
+      <VersionManager server={server} open={showVersions} onClose={() => setShowVersions(false)} />
+      <PluginManager server={server} open={showPlugins} onClose={() => setShowPlugins(false)} />
     </Shell>
   )
 }

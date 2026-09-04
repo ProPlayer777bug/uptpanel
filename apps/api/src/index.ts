@@ -18,6 +18,7 @@ import { issueOtp, verifyOtp, sendOtp, oauthAuthorizeUrl, oauthCallback, oauthCa
 import { AgentClient, agentFor } from './modules/agentClient.js'
 import { sshProbe, sshInstall } from './modules/sshConnect.js'
 import { startMCVersionWatcher, currentDefaults, javaImage, mcState, refreshMCManifest } from './modules/mcVersions.js'
+import { refreshCatalog, snapshot as catalogSnapshot, resolveVersionDownload, resolvePluginDownload, startCatalogWatcher } from './modules/catalog.js'
 import WebSocket from 'ws'
 
 const PORT = Number(process.env.UH_API_PORT || 8081)
@@ -1370,6 +1371,107 @@ app.get('/api/mc/versions', async (req) => {
   return { ok: true, versions: currentDefaults(), meta: mcState() }
 })
 
+// -- Marketplace catalog (versions + plugins) — refreshed every hour ---------
+app.get('/api/catalog', async (req) => {
+  const user = me(req)
+  if (!user) return { ok: false, error: 'UNAUTHENTICATED' }
+  return { ok: true, catalog: catalogSnapshot() }
+})
+
+// Change a Minecraft server's version: picks the new server.jar for the pinned
+// version, downloads it onto the node and reinstalls the server (world data is
+// preserved — only server.jar is replaced).
+app.post('/api/servers/:id/version', async (req, reply) => {
+  const user = me(req)
+  if (!user) return reply.code(401).send({ ok: false, error: 'UNAUTHENTICATED' })
+  if (!can(user, 'admin')) return reply.code(403).send({ ok: false, error: 'FORBIDDEN' })
+  const { id } = req.params as any
+  const { version } = (req.body || {}) as any
+  if (!version) return reply.code(400).send({ ok: false, error: 'VERSION_REQUIRED' })
+  const server = store.db.servers.find((s) => s.id === id)
+  if (!server) return reply.code(404).send({ ok: false, error: 'SERVER_NOT_FOUND' })
+  if (!(server.blueprintId === 'bp-minecraft' || server.blueprintId === 'bp-paper')) {
+    return reply.code(400).send({ ok: false, error: 'NOT_A_MINECRAFT_SERVER' })
+  }
+  const resolved = await resolveVersionDownload(version, server.blueprintId)
+  if (!resolved?.url) return reply.code(404).send({ ok: false, error: 'VERSION_NOT_FOUND', detail: 'Could not resolve a download for this version.' })
+
+  const node = store.db.nodes.find((n) => n.id === server.nodeId)
+  const client = agentFor(node)
+  if (!client) return reply.code(409).send({ ok: false, error: 'NODE_UNREACHABLE' })
+
+  server.state = 'restarting'
+  store.persist()
+  hub.to(`srv:${id}`, { type: 'server-update', data: server })
+  pushTerminal(id, `[version] switching to ${resolved.platform || ''} ${resolved.name} — replacing server.jar ...`, 'warn')
+  try {
+    // Replace only the server.jar (world/plugins preserved), then update the
+    // startup image java if the new version requires a different runtime.
+    await client.downloadFile(id, 'server.jar', resolved.url)
+    server.mcVersion = resolved.name
+    server.mcPlatform = resolved.platform || server.mcPlatform || 'paper'
+    server.javaVersion = resolved.java ?? server.javaVersion
+    // Reset the docker image to match the required java runtime (vanilla uses
+    // its own java; paper/purpur/folia all run modern versions on Java 21).
+    const prevImage = server.image
+    server.image = javaImage(resolved.java)
+    store.persist()
+    if (server.state !== 'offline') {
+      try { await client.power(id, 'stop') } catch { /* may already be stopped */ }
+    }
+    if (prevImage !== server.image) {
+      // Recreate the container so the new java runtime image is used.
+      await client.remove(id)
+      await client.createContainer(buildManifest(server))
+    }
+    pushTerminal(id, `[version] now on ${resolved.name} — server ready to start`, 'info')
+    activity(user, 'server', 'info', `Changed ${server.name} to Minecraft ${resolved.name}`, { serverId: id })
+    audit(store, user.name, 'CHANGE_VERSION', `server:${server.name} -> ${resolved.name}`)
+    hub.to(`srv:${id}`, { type: 'server-update', data: server })
+    return { ok: true, server: withRelations(server) }
+  } catch (e: any) {
+    server.state = 'error'
+    server.error = String(e?.message || e)
+    store.persist()
+    hub.to(`srv:${id}`, { type: 'server-update', data: server })
+    return reply.code(500).send({ ok: false, error: 'VERSION_CHANGE_FAILED', message: String(e?.message || e) })
+  }
+})
+
+// Install a plugin (from SpigotMC / Modrinth catalog) onto a Minecraft server.
+// The jar is downloaded onto the node into the server's plugins/ folder.
+app.post('/api/servers/:id/plugins', async (req, reply) => {
+  const user = me(req)
+  if (!user) return reply.code(401).send({ ok: false, error: 'UNAUTHENTICATED' })
+  if (!can(user, 'admin')) return reply.code(403).send({ ok: false, error: 'FORBIDDEN' })
+  const { id } = req.params as any
+  const { pluginId } = (req.body || {}) as any
+  if (!pluginId) return reply.code(400).send({ ok: false, error: 'PLUGIN_REQUIRED' })
+  const server = store.db.servers.find((s) => s.id === id)
+  if (!server) return reply.code(404).send({ ok: false, error: 'SERVER_NOT_FOUND' })
+  if (!(server.blueprintId === 'bp-minecraft' || server.blueprintId === 'bp-paper')) {
+    return reply.code(400).send({ ok: false, error: 'NOT_A_MINECRAFT_SERVER' })
+  }
+  const resolved = await resolvePluginDownload(pluginId)
+  if (!resolved?.url) return reply.code(404).send({ ok: false, error: 'PLUGIN_NOT_FOUND', detail: 'Could not resolve a download for this plugin.' })
+
+  const node = store.db.nodes.find((n) => n.id === server.nodeId)
+  const client = agentFor(node)
+  if (!client) return reply.code(409).send({ ok: false, error: 'NODE_UNREACHABLE' })
+
+  const targetPath = `plugins/${resolved.fileName}`
+  pushTerminal(id, `[plugins] installing ${resolved.name} ...`, 'warn')
+  try {
+    await client.downloadFile(id, targetPath, resolved.url)
+    pushTerminal(id, `[plugins] installed ${resolved.fileName} — restart the server to load it`, 'info')
+    activity(user, 'server', 'info', `Installed plugin ${resolved.name} on ${server.name}`, { serverId: id })
+    audit(store, user.name, 'INSTALL_PLUGIN', `server:${server.name} plugin:${resolved.name}`)
+    return { ok: true, path: targetPath, name: resolved.name }
+  } catch (e: any) {
+    return reply.code(502).send({ ok: false, error: 'PLUGIN_INSTALL_FAILED', message: String(e?.message || e) })
+  }
+})
+
 // ---------------------------------------------------------------------------
 // Servers — real Docker containers managed by the node agent
 // ---------------------------------------------------------------------------
@@ -1767,6 +1869,158 @@ app.post('/api/servers/:id/files/write', async (req, reply) => {
   const res = await client.writeFile(server.id, path, content)
   audit(store, user.name, 'EDIT_FILE', `file:${path}`)
   return res
+})
+
+// Delete a file or directory (recursive).
+app.post('/api/servers/:id/files/delete', async (req, reply) => {
+  const user = me(req)
+  if (!user) return reply.code(401).send({ ok: false, error: 'UNAUTHENTICATED' })
+  const { id } = req.params as any
+  const found = findServer(user, id)
+  if ('error' in found) return reply.code(found.status).send({ ok: false, error: found.error })
+  const server = found.server
+  const acc = serverAccess(user, server, store)
+  if (!acc.permissions.files) return reply.code(403).send({ ok: false, error: 'FORBIDDEN' })
+  const client = agentFor(store.db.nodes.find((n) => n.id === server.nodeId))
+  if (!client) return reply.code(409).send({ ok: false, error: 'NODE_UNREACHABLE' })
+  const { path } = (req.body || {}) as any
+  if (!path) return reply.code(400).send({ ok: false, error: 'PATH_REQUIRED' })
+  const res = await client.deleteFile(server.id, path)
+  audit(store, user.name, 'DELETE_FILE', `file:${path}`)
+  return res
+})
+
+// Rename / move a file or directory.
+app.post('/api/servers/:id/files/rename', async (req, reply) => {
+  const user = me(req)
+  if (!user) return reply.code(401).send({ ok: false, error: 'UNAUTHENTICATED' })
+  const { id } = req.params as any
+  const found = findServer(user, id)
+  if ('error' in found) return reply.code(found.status).send({ ok: false, error: found.error })
+  const server = found.server
+  const acc = serverAccess(user, server, store)
+  if (!acc.permissions.files) return reply.code(403).send({ ok: false, error: 'FORBIDDEN' })
+  const client = agentFor(store.db.nodes.find((n) => n.id === server.nodeId))
+  if (!client) return reply.code(409).send({ ok: false, error: 'NODE_UNREACHABLE' })
+  const { from, to } = (req.body || {}) as any
+  if (!from || !to) return reply.code(400).send({ ok: false, error: 'FROM_TO_REQUIRED' })
+  const res = await client.renameFile(server.id, from, to)
+  audit(store, user.name, 'RENAME_FILE', `file:${from}->${to}`)
+  return res
+})
+
+// Create a directory.
+app.post('/api/servers/:id/files/mkdir', async (req, reply) => {
+  const user = me(req)
+  if (!user) return reply.code(401).send({ ok: false, error: 'UNAUTHENTICATED' })
+  const { id } = req.params as any
+  const found = findServer(user, id)
+  if ('error' in found) return reply.code(found.status).send({ ok: false, error: found.error })
+  const server = found.server
+  const acc = serverAccess(user, server, store)
+  if (!acc.permissions.files) return reply.code(403).send({ ok: false, error: 'FORBIDDEN' })
+  const client = agentFor(store.db.nodes.find((n) => n.id === server.nodeId))
+  if (!client) return reply.code(409).send({ ok: false, error: 'NODE_UNREACHABLE' })
+  const { path } = (req.body || {}) as any
+  if (!path) return reply.code(400).send({ ok: false, error: 'PATH_REQUIRED' })
+  const res = await client.makeDir(server.id, path)
+  audit(store, user.name, 'MKDIR', `dir:${path}`)
+  return res
+})
+
+// Zip a file/dir into a sibling .zip on the node.
+app.post('/api/servers/:id/files/archive', async (req, reply) => {
+  const user = me(req)
+  if (!user) return reply.code(401).send({ ok: false, error: 'UNAUTHENTICATED' })
+  const { id } = req.params as any
+  const found = findServer(user, id)
+  if ('error' in found) return reply.code(found.status).send({ ok: false, error: found.error })
+  const server = found.server
+  const acc = serverAccess(user, server, store)
+  if (!acc.permissions.files) return reply.code(403).send({ ok: false, error: 'FORBIDDEN' })
+  const client = agentFor(store.db.nodes.find((n) => n.id === server.nodeId))
+  if (!client) return reply.code(409).send({ ok: false, error: 'NODE_UNREACHABLE' })
+  const { path } = (req.body || {}) as any
+  if (!path) return reply.code(400).send({ ok: false, error: 'PATH_REQUIRED' })
+  const res = await client.archive(server.id, path)
+  audit(store, user.name, 'ARCHIVE', `file:${path}`)
+  return res
+})
+
+// Extract a zip already on the node into the current directory.
+app.post('/api/servers/:id/files/archive/extract', async (req, reply) => {
+  const user = me(req)
+  if (!user) return reply.code(401).send({ ok: false, error: 'UNAUTHENTICATED' })
+  const { id } = req.params as any
+  const found = findServer(user, id)
+  if ('error' in found) return reply.code(found.status).send({ ok: false, error: found.error })
+  const server = found.server
+  const acc = serverAccess(user, server, store)
+  if (!acc.permissions.files) return reply.code(403).send({ ok: false, error: 'FORBIDDEN' })
+  const client = agentFor(store.db.nodes.find((n) => n.id === server.nodeId))
+  if (!client) return reply.code(409).send({ ok: false, error: 'NODE_UNREACHABLE' })
+  const { path } = (req.body || {}) as any
+  if (!path) return reply.code(400).send({ ok: false, error: 'PATH_REQUIRED' })
+  const res = await client.extractArchive(server.id, path)
+  audit(store, user.name, 'EXTRACT_ARCHIVE', `file:${path}`)
+  return res
+})
+
+// Upload one or more files (multipart) into the given directory.
+app.post('/api/servers/:id/files/upload', async (req, reply) => {
+  const user = me(req)
+  if (!user) return reply.code(401).send({ ok: false, error: 'UNAUTHENTICATED' })
+  const { id } = req.params as any
+  const found = findServer(user, id)
+  if ('error' in found) return reply.code(found.status).send({ ok: false, error: found.error })
+  const server = found.server
+  const acc = serverAccess(user, server, store)
+  if (!acc.permissions.files) return reply.code(403).send({ ok: false, error: 'FORBIDDEN' })
+  const client = agentFor(store.db.nodes.find((n) => n.id === server.nodeId))
+  if (!client) return reply.code(409).send({ ok: false, error: 'NODE_UNREACHABLE' })
+  const path = (req.query as any)?.path || '/'
+  // raw multipart proxy: pass the incoming body stream through to the agent
+  const url = `${client.baseUrl}/api/servers/${server.id}/files/upload?path=${encodeURIComponent(path)}`
+  const up = await client.fetchTls(url, {
+    method: 'POST',
+    headers: {
+      authorization: `Bearer ${client.token}`,
+      ...(req.headers['content-type'] ? { 'content-type': String(req.headers['content-type']) } : {}),
+    },
+    body: req.raw,
+    duplex: 'half',
+  } as any)
+  if (!up.ok) {
+    const text = await up.text().catch(() => '')
+    return reply.code(up.status).send({ ok: false, error: 'UPLOAD_FAILED', detail: text.slice(0, 200) })
+  }
+  const res = await up.json().catch(() => ({ ok: true }))
+  audit(store, user.name, 'UPLOAD_FILES', `dir:${path}`)
+  return res
+})
+
+// Download a file's bytes to the browser.
+app.get('/api/servers/:id/files/download', async (req, reply) => {
+  const user = me(req)
+  if (!user) return reply.code(401).send()
+  const { id } = req.params as any
+  const found = findServer(user, id)
+  if ('error' in found) return reply.code(found.status).send({ ok: false, error: found.error })
+  const server = found.server
+  const acc = serverAccess(user, server, store)
+  if (!acc.permissions.files) return reply.code(403).send({ ok: false, error: 'FORBIDDEN' })
+  const client = agentFor(store.db.nodes.find((n) => n.id === server.nodeId))
+  if (!client) return reply.code(409).send({ ok: false, error: 'NODE_UNREACHABLE' })
+  const path = (req.query as any)?.path || ''
+  if (!path) return reply.code(400).send({ ok: false, error: 'PATH_REQUIRED' })
+  const up = await client.downloadFileBytes(server.id, path)
+  if (!up.ok) return reply.code(up.status).send({ ok: false, error: 'FILE_UNAVAILABLE' })
+  const buf = Buffer.from(await up.arrayBuffer())
+  reply.header('Content-Type', 'application/octet-stream')
+  reply.header('Content-Disposition', `attachment; filename="${encodeURIComponent(path.split('/').pop() || 'file')}"`)
+  reply.header('Content-Length', String(buf.length))
+  audit(store, user.name, 'DOWNLOAD_FILE', `file:${path}`)
+  return reply.send(buf)
 })
 
 // ---------------------------------------------------------------------------
@@ -2410,7 +2664,8 @@ app.get('/api/servers/:id/terminal', async (req, reply) => {
 //     falling back to the pinned 1.21.11 jar when resolution fails.
 async function resolveServerJar(server: any): Promise<string> {
   const mc = server.mcVersion
-  if (server.blueprintId === 'bp-minecraft') {
+  const platform = server.mcPlatform || (server.blueprintId === 'bp-minecraft' ? 'vanilla' : 'paper')
+  if (platform === 'vanilla') {
     if (mc) {
       const info = mcState().infoByVersion?.[mc]
       if (info?.serverJar) return info.serverJar
@@ -2427,17 +2682,10 @@ async function resolveServerJar(server: any): Promise<string> {
     // Unknown/no version: fall back to the latest release's jar.
     const cur = currentDefaults()
     if (cur.release?.serverJar) return cur.release.serverJar
-  }
-  if (server.blueprintId === 'bp-paper' && mc) {
-    const safe = mc.replace(/[^0-9.]/g, '')
-    try {
-      const builds = await (await fetch(`https://api.papermc.io/v2/projects/paper/versions/${safe}/builds`, { headers: { accept: 'application/json' } })).json()
-      const list: any[] = Array.isArray(builds?.builds) ? builds.builds : []
-      if (list.length > 0) {
-        const last = list[list.length - 1]
-        return `https://api.papermc.io/v2/projects/paper/versions/${safe}/builds/${last.build}/downloads/${last.downloads?.application?.name}`
-      }
-    } catch { /* fall through */ }
+  } else if (mc) {
+    // Paper / Purpur / Folia: resolve via the catalog's platform-aware id.
+    const resolved = await resolveVersionDownload(`${platform}@${mc}`, 'bp-paper')
+    if (resolved?.url) return resolved.url
   }
   return PAPER_21_11_JAR
 }
@@ -2821,7 +3069,7 @@ app.setErrorHandler((err, req, reply) => {
   reply.status(500).send({ ok: false, code: `UH-${id}`, error: (err as any).code || 'INTERNAL', message: (err as Error).message })
 })
 
-app.listen({ port: PORT, host: '0.0.0.0' }).then((addr) => {
+app.listen({ port: PORT, host: '0.0.0.0' }).then(async (addr) => {
   console.log(`[UptimeHost] Control Core listening on ${addr}`)
   console.log(`[UptimeHost] REST API → http://localhost:${PORT}/api`)
   console.log(`[UptimeHost] WS → ws://localhost:${PORT}/ws`)
@@ -2829,6 +3077,9 @@ app.listen({ port: PORT, host: '0.0.0.0' }).then((addr) => {
   // Refresh on boot and every 6h so new releases become the default for new
   // servers without any manual intervention.
   startMCVersionWatcher().catch((e) => console.error('[mc] version watcher failed', e))
+  // Auto-refreshing marketplace catalog (versions + SpigotMC/Modrinth plugins)
+  // refreshed every hour.
+  await startCatalogWatcher().catch((e) => console.error('[catalog] watcher failed', e))
 }).catch((err) => {
   console.error(err)
   process.exit(1)
