@@ -116,20 +116,39 @@ async function fetchVanillaVersions(): Promise<CatalogVersion[]> {
   }
 }
 
+// Compare two Minecraft version strings numerically, descending (newest first).
+// Handles pre-release suffixes by treating them as older than the plain release.
+function mcVersionCompare(a: string, b: string): number {
+  const partsA = a.split('-')[0].split('.').map((n) => Number(n) || 0)
+  const partsB = b.split('-')[0].split('.').map((n) => Number(n) || 0)
+  const len = Math.max(partsA.length, partsB.length)
+  for (let i = 0; i < len; i++) {
+    const x = partsA[i] || 0
+    const y = partsB[i] || 0
+    if (x !== y) return y - x
+  }
+  // Equal numeric version → a plain release is newer than a pre/snapshot build.
+  const pre = /-(rc|pre|snapshot)/i
+  const pa = pre.test(a) ? 1 : 0
+  const pb = pre.test(b) ? 1 : 0
+  if (pa !== pb) return pa - pb
+  return 0
+}
+
 // Generic fetcher for PaperMC "fill" project platforms (paper, folia, ...).
 async function fetchFillVersions(project: McPlatform): Promise<CatalogVersion[]> {
   try {
     const data: any = await fetchJson(`https://fill.papermc.io/v3/projects/${project}`)
     const groups: Record<string, string[]> = data?.versions || {}
-    // Flatten version groups (group key -> concrete version ids). Take the
-    // most recent ~24 concrete versions, newest first.
+    // Flatten version groups (group key -> concrete version ids), then sort by
+    // real Minecraft version (not API insertion order, which is reordered by
+    // integer-like object keys) and take the most recent ~24, newest first.
     const all: string[] = []
     for (const v of Object.values(groups)) {
       if (Array.isArray(v)) all.push(...v)
     }
     const unique = Array.from(new Set(all))
-    const top = unique.slice(-24)
-    top.reverse()
+    const top = unique.sort(mcVersionCompare).slice(0, 24)
     const out: CatalogVersion[] = []
     for (const v of top) {
       const url = await fillBuildDownload(project, v)
@@ -147,8 +166,9 @@ async function fetchPurpurVersions(): Promise<CatalogVersion[]> {
   try {
     const data: any = await fetchJson('https://api.purpurmc.org/v2/purpur')
     const list: string[] = Array.isArray(data?.versions) ? data.versions : []
-    // Purpur returns newest-first; keep the latest ~24.
-    const top = list.slice(0, 24)
+    // Purpur returns oldest-first; sort numerically (newest first) and keep
+    // the latest ~24.
+    const top = [...list].sort(mcVersionCompare).slice(0, 24)
     const out: CatalogVersion[] = []
     for (const v of top) {
       let url: string | null = null
