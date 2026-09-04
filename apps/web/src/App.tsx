@@ -1,6 +1,6 @@
 import { lazy, Suspense } from 'react'
 import { Routes, Route, Navigate, useLocation } from 'react-router-dom'
-import { ToastHost } from './components/ui'
+import { ErrorBoundary, ToastHost } from './components/ui'
 import { useApp } from './state/auth'
 import { Login } from './pages/Login'
 import { OAuthCallback } from './pages/OAuthCallback'
@@ -59,7 +59,7 @@ export default function App() {
   if (!user) return <Login />
 
   return (
-    <>
+    <ErrorBoundary>
       <Routes>
         <Route path="/" element={<Page><Dashboard /></Page>} />
         <Route path="/servers" element={<Page><Servers /></Page>} />
@@ -80,6 +80,6 @@ export default function App() {
         <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>
       <ToastHost />
-    </>
+    </ErrorBoundary>
   )
 }

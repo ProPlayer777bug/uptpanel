@@ -1,4 +1,4 @@
-import { useEffect, useState, type ReactNode, type ButtonHTMLAttributes } from 'react'
+import { Component, useEffect, useState, type ReactNode, type ButtonHTMLAttributes } from 'react'
 import { createPortal } from 'react-dom'
 
 /* ---------- Spinner ---------- */
@@ -368,4 +368,24 @@ export function Tabs<T extends string>({ tabs, value, onChange }: {
       ))}
     </div>
   )
+}
+
+/* ---------- Error Boundary ---------- */
+interface EBState { error: Error | null }
+export class ErrorBoundary extends Component<{ children: ReactNode }, EBState> {
+  state: EBState = { error: null }
+  static getDerivedStateFromError(error: Error) { return { error } }
+  render() {
+    if (this.state.error) {
+      return (
+        <div className="center" style={{ padding: 60, flexDirection: 'column', gap: 12 }}>
+          <div className="brand-mark" style={{ width: 38, height: 38, fontSize: 17 }}>U</div>
+          <p style={{ color: 'var(--text-2)', fontSize: 14 }}>Something went wrong.</p>
+          <p className="sm text-3" style={{ maxWidth: 400, textAlign: 'center' }}>{this.state.error.message}</p>
+          <button className="btn primary sm" onClick={() => { this.setState({ error: null }); window.location.reload() }}>Reload page</button>
+        </div>
+      )
+    }
+    return this.props.children
+  }
 }

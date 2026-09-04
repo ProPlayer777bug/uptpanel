@@ -77,6 +77,7 @@ export function ConsoleTab({ server }: { server: Server }) {
   const [searchQ, setSearchQ] = useState('')
   const [showSearch, setShowSearch] = useState(false)
   const [fullscreen, setFullscreen] = useState(false)
+  const [liveStats, setLiveStats] = useState<{ cpuPercent?: number; memoryUsedMb?: number; pids?: number }>({})
   const pendingRef = useRef<Line[]>([])
   const wsRef = useRef<WebSocket | null>(null)
   const boxRef = useRef<HTMLDivElement>(null)
@@ -101,6 +102,13 @@ export function ConsoleTab({ server }: { server: Server }) {
     api.get(`/servers/${server.id}/startup`).then((d: any) => {
       if (d?.startupCommand) setStartupCmd(d.startupCommand)
     }).catch(() => {})
+  }, [server.id])
+
+  useEffect(() => {
+    const poll = () => api.get(`/servers/${server.id}/stats`).then((d: any) => { if (d?.stats) setLiveStats(d.stats) }).catch(() => {})
+    poll()
+    const t = setInterval(poll, 6000)
+    return () => clearInterval(t)
   }, [server.id])
 
   // Pterodactyl-style "Server marked as running..." banner emitted once the
@@ -353,8 +361,8 @@ export function ConsoleTab({ server }: { server: Server }) {
           <span className="xs text-3"><Icon name="node" size={11} /> {host}</span>
           <span style={{ flex: 1 }} />
           <span className="xs text-3">uptime <b className="text-2">{running ? fmtUptime(server.startedAt) : 'offline'}</b></span>
-          <span className="xs text-3">CPU <b className="text-2">{server.cpuPercent}%</b></span>
-          <span className="xs text-3">MEM <b className="text-2">{server.memoryLimitMb}MB</b></span>
+          <span className="xs text-3">CPU <b className="text-2">{liveStats.cpuPercent != null ? `${(Math.round((liveStats.cpuPercent || 0) * 100) / 100).toFixed(2)}%` : '—'}</b> <span className="text-3">/ {server.cpuPercent}%</span></span>
+          <span className="xs text-3">MEM <b className="text-2">{liveStats.memoryUsedMb != null ? `${Math.round(liveStats.memoryUsedMb)}MB` : '—'}</b> <span className="text-3">/ {server.memoryLimitMb}MB</span></span>
           <span className="badge gray mono xs">{server.id}</span>
         </div>
       </div>
@@ -377,15 +385,15 @@ export function ConsoleTab({ server }: { server: Server }) {
           <StatBlock
             icon="cpu"
             label="CPU"
-            value={`${server.cpuPercent}%`}
-            sub="limit"
+            value={liveStats.cpuPercent != null ? `${(Math.round((liveStats.cpuPercent || 0) * 100) / 100).toFixed(2)}%` : '—'}
+            sub={`/ ${server.cpuPercent}% limit`}
             iconCls="cyan"
           />
           <StatBlock
             icon="down"
             label="Memory"
-            value={`${server.memoryLimitMb} MB`}
-            sub="limit"
+            value={liveStats.memoryUsedMb != null ? `${Math.round(liveStats.memoryUsedMb)} MB` : '—'}
+            sub={`/ ${server.memoryLimitMb} MB limit`}
             iconCls="amber"
           />
           <StatBlock
@@ -398,7 +406,7 @@ export function ConsoleTab({ server }: { server: Server }) {
           <StatBlock
             icon="layers"
             label="Processes"
-            value="—"
+            value={liveStats.pids != null ? `${liveStats.pids}` : '—'}
             sub="container pids"
             iconCls="green"
           />
