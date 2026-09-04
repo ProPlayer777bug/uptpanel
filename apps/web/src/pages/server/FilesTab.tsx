@@ -138,8 +138,8 @@ export function FilesTab({ server }: { server: Server }) {
   const selCount = selected.size
 
   return (
-    <div className="card">
-      <div className="card-h" style={{ gap: 6 }}>
+    <div className="card fm">
+      <div className="card-h fm-toolbar" style={{ gap: 6 }}>
         <button className="btn ghost icon sm" onClick={() => setCwd('/')} title="Root"><Icon name="folder" size={14} /></button>
         <button className="btn ghost icon sm" onClick={() => setCwd(parentOf(cwd))} disabled={cwd === '/'} title="Up"><Icon name="chevron" size={14} /></button>
         <div className="flex items-center gap-1 sm mono" style={{ overflow: 'hidden', flex: 1 }}>
@@ -161,7 +161,7 @@ export function FilesTab({ server }: { server: Server }) {
       </div>
 
       {creating && (
-        <div className="flex gap-2 items-center" style={{ padding: '8px 14px', borderBottom: '1px solid var(--border)' }}>
+        <div className="flex gap-2 items-center fm-create" style={{ padding: '8px 14px', borderBottom: '1px solid var(--border)' }}>
           <input className="input sm mono flex-1" placeholder="name" value={newName} autoFocus onChange={(e) => setNewName(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && createFile()} />
           <button className="btn primary sm" disabled={!newName.trim()} onClick={createFile}>Create file</button>
           <button className="btn sm ghost" disabled={!newName.trim()} onClick={createFolder}>Create folder</button>
@@ -170,7 +170,7 @@ export function FilesTab({ server }: { server: Server }) {
       )}
 
       {selCount > 0 && (
-        <div className="flex gap-2 items-center" style={{ padding: '8px 14px', borderBottom: '1px solid var(--border)', background: 'var(--bg-2)' }}>
+        <div className="flex gap-2 items-center fm-selbar" style={{ padding: '8px 14px', borderBottom: '1px solid var(--border)', background: 'var(--bg-2)' }}>
           <span className="sm text-2">{selCount} selected</span>
           <div style={{ flex: 1 }} />
           <button className="btn sm ghost" disabled={busy} onClick={() => setDeleteTargets([...selected])}><Icon name="trash" size={13} /> Delete</button>

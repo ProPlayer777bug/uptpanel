@@ -1482,3 +1482,103 @@ textarea.input { resize: vertical; min-height: 80px; }
   position: absolute; top: 8px; right: 8px; width: 10px; height: 10px;
   border-radius: 50%; border: 2px solid var(--bg); box-shadow: 0 1px 3px rgba(0,0,0,0.5);
 }
+
+/* ============================================================
+   File Manager — premium gold edition
+   Scoped to the FilesTab (.fm), giving the file manager its own
+   gold identity and an elevated, "premium" feel regardless of the
+   active panel theme. Everything reads from the internal gold
+   accent variables so buttons, icons, selection, checkboxes and
+   hovers all share one warm tone.
+   ============================================================ */
+.fm {
+  /* Gold identity, scoped to this subtree */
+  --gold: #d4a017;
+  --gold-strong: #ffd24a;
+  --gold-bright: #fdc92f;
+  --gold-soft: rgba(212,160,23,0.16);
+  --gold-line: rgba(224,180,40,0.45);
+  --gold-ink: #241903;
+
+  --accent: var(--gold);
+  --accent-strong: var(--gold-bright);
+  --cyan: var(--gold);
+  --cyan-strong: var(--gold-bright);
+  --info: var(--gold);
+  --accent-soft: var(--gold-soft);
+  --accent-line: var(--gold-line);
+  --cyan-soft: var(--gold-soft);
+  --cyan-line: var(--gold-line);
+  --focus-ring: rgba(224,180,40,0.5);
+  --info-soft: var(--gold-soft);
+  --info-line: var(--gold-line);
+  --accent-ink: var(--gold-ink);
+
+  border: 1px solid var(--gold-line);
+  box-shadow: 0 0 0 1px rgba(212,160,23,0.08), 0 6px 24px -6px rgba(0,0,0,0.55), 0 0 40px -12px rgba(212,160,23,0.25);
+}
+
+/* Toolbar — warm gold header strip */
+.fm .fm-toolbar {
+  position: relative;
+  background:
+    linear-gradient(180deg, color-mix(in srgb, var(--gold-soft) 55%, var(--surface-2)), var(--surface) 62%);
+  border-bottom: 1px solid var(--gold-line);
+  padding: 10px 14px;
+}
+.fm .fm-toolbar::after {
+  content: "";
+  position: absolute; left: 0; right: 0; top: 0; height: 1px;
+  background: linear-gradient(90deg, transparent, rgba(255,210,74,0.7), transparent);
+}
+
+/* Breadcrumb path — warm, premium */
+.fm .fm-toolbar .mono a {
+  font-weight: 600;
+  color: var(--text-2);
+  transition: color var(--speed) var(--ease);
+}
+.fm .fm-toolbar .mono a:hover { color: var(--gold-bright); text-shadow: 0 0 12px var(--gold-line); }
+.fm .fm-toolbar .mono .text-3 { color: color-mix(in srgb, var(--gold) 70%, var(--text-3)); }
+
+/* Buttons inside the file manager get a warm tint */
+.fm .btn.ghost {
+  background: color-mix(in srgb, var(--gold-soft) 30%, var(--surface-2));
+  border-color: color-mix(in srgb, var(--gold-line) 60%, var(--line));
+  color: var(--gold-bright);
+}
+.fm .btn.ghost:hover { background: var(--gold-soft); border-color: var(--gold); color: var(--gold-bright); }
+
+/* Table — subtle gold glow on hover and selection */
+.fm .dtable th {
+  color: color-mix(in srgb, var(--gold) 80%, var(--text-3));
+  background: color-mix(in srgb, var(--gold-soft) 25%, var(--surface));
+}
+.fm .dtable tbody tr:hover { background: color-mix(in srgb, var(--gold-soft) 35%, var(--surface-2)); }
+.fm .dtable tbody tr.sel { background: var(--gold-soft); }
+.fm .dtable td { border-bottom-color: color-mix(in srgb, var(--gold-line) 40%, var(--line)); }
+
+/* Folder row icon glow */
+.fm .dtable td .accent { filter: drop-shadow(0 0 6px var(--gold-line)); }
+
+/* Selection bar */
+.fm .fm-selbar { background: color-mix(in srgb, var(--gold-soft) 40%, var(--bg)) !important; }
+
+/* New-file / create strip */
+.fm .fm-create { border-bottom-color: var(--gold-line) !important; }
+
+/* Checkboxes — gold */
+.fm .dtable input[type='checkbox'] { accent-color: var(--gold-bright); }
+
+/* Menu trigger dot hover */
+.fm .menu .btn.ghost.icon:hover { color: var(--gold-bright); }
+
+/* Editor accent */
+.fm textarea:focus { box-shadow: 0 0 0 1px var(--gold-line); }
+.fm .btn.primary {
+  background: linear-gradient(180deg, var(--gold-strong), var(--gold));
+  border-color: var(--gold-bright);
+  color: var(--gold-ink);
+  box-shadow: 0 4px 14px var(--gold-line);
+}
+.fm .btn.primary:hover { background: linear-gradient(180deg, var(--gold-bright), var(--gold-strong)); box-shadow: 0 4px 20px var(--gold-line); }
