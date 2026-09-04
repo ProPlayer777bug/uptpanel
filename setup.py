@@ -21,6 +21,17 @@ operates the UptimeHost control plane on the current machine.
     [5] Install requirements install npm + Go dependencies and build the agent.
     [6] Add admin user/pass  log into the panel API as an existing admin and
                              provision a new administrator account.
+    [7] Configure SMTP       point the panel at your SMTP server for email/OTP
+                             sign-in; optionally send a test message to verify.
+    [8] Configure Google     paste your Google OAuth client id/secret (auto-redirect).
+    [9] Configure GitHub     paste your GitHub OAuth client id/secret (auto-redirect).
+    [10] Configure all auth  guided pass to set SMTP + Google + GitHub together.
+    [11] Generate script     pick a predefined template (node install / HTTPS /
+                             backup) and emit a ready-to-run shell script with
+                             your own credentials/addresses baked in.
+
+Each auth step talks to the running panel over its admin API — no manual DB
+editing. Only the panel URL + an admin login are needed.
 
 Uses only the Python standard library. On POSIX systems it daemonizes service
 processes with their own session; on Windows it uses CREATE_NEW_PROCESS_GROUP.
@@ -31,6 +42,17 @@ Environment overrides (all optional):
                    (default: http://localhost:8081)
     UH_WEB_PORT    web dev-server port (default: 8080)
     UH_API_PORT    API port (default: 8081)
+
+Auth-configuration overrides:
+    UH_PANEL_URL / UH_PANEL_ADMIN_EMAIL / UH_PANEL_ADMIN_PASSWORD
+    UH_PANEL_ADMIN_TOKEN   (token avoids the password prompt; for non-TTY runs)
+    UH_SMTP_HOST / UH_SMTP_PORT / UH_SMTP_USER / UH_SMTP_PASS / UH_SMTP_FROM
+    UH_GOOGLE_CLIENT_ID / UH_GOOGLE_CLIENT_SECRET / UH_GOOGLE_REDIRECT
+    UH_GITHUB_CLIENT_ID / UH_GITHUB_CLIENT_SECRET / UH_GITHUB_REDIRECT
+
+Script-generation overrides (prefix each template env var with UH_SCRIPT_):
+    e.g. UH_SCRIPT_PANEL_URL, UH_SCRIPT_AGENT_HOST, UH_SCRIPT_PANEL_EMAIL ...
+    and UH_SCRIPT_TEMPLATE=node-agent|panel-https|backup-data
 """
 
 import getpass
@@ -695,6 +717,393 @@ def add_admin():
 
 
 # ---------------------------------------------------------------------------
+# Auth-provider configuration (SMTP / Google / GitHub) — pushed to the panel
+# through the admin API so no manual editing of the DB is needed.
+# ---------------------------------------------------------------------------
+def _panel_login():
+    """Resolve the panel admin session (env override or interactive login)."""
+    api = os.environ.get("UH_PANEL_URL", "").rstrip("/") or API_URL
+    if not api.startswith(("http://", "https://")):
+        api = "https://" + api if not api.startswith("http") else api
+    token = os.environ.get("UH_PANEL_ADMIN_TOKEN", "").strip()
+    if token:
+        return api, token
+    email = os.environ.get("UH_PANEL_ADMIN_EMAIL", "").strip() or "admin@uptime.host"
+    pwd = os.environ.get("UH_PANEL_ADMIN_PASSWORD", "").strip()
+    if not pwd:
+        if sys.stdin.isatty():
+            pwd = getpass.getpass(f"Panel admin password ({email}): ")
+        else:
+            die("set UH_PANEL_ADMIN_PASSWORD (or UH_PANEL_ADMIN_TOKEN) to configure auth (stdin is not a TTY)", 2)
+    code, res = http_json(f"{api}/api/auth/login", {"email": email, "password": pwd})
+    if code != 200 or not res.get("token"):
+        die(f"panel login failed ({code}): {res.get('error', res)}")
+    return api, res["token"]
+
+
+def _get_providers(api, token):
+    code, res = http_json(f"{api}/api/admin/auth-providers", token=token)
+    if code != 200:
+        die(f"could not read auth providers ({code}): {res.get('error', res)}")
+    return res.get("providers", {})
+
+
+def _put_providers(api, token, patch):
+    """Send a partial provider patch. Secrets left blank keep their existing
+    value; an empty string clears the field."""
+    code, res = http_json(f"{api}/api/admin/auth-providers", patch, token=token, method="PUT")
+    if code != 200:
+        die(f"failed to save auth providers ({code}): {res.get('error', res)}")
+    return res.get("providers", {})
+
+
+def configure_smtp():
+    """[7] Configure the panel's SMTP (email/OTP) settings via the API."""
+    info("Configure SMTP (used for email-OTP / magic-link sign-in)")
+    api, token = _panel_login()
+    cur = _get_providers(api, token).get("smtp", {})
+    defaults = {
+        "host": cur.get("host") or "smtp.gmail.com",
+        "port": int(cur.get("port") or 587),
+        "user": cur.get("user") or "",
+        "from": cur.get("from") or "",
+    }
+    host = q("SMTP host", "UH_SMTP_HOST", defaults["host"]).strip()
+    port_s = q("SMTP port", "UH_SMTP_PORT", str(defaults["port"])).strip() or "587"
+    port = int(port_s)
+    secure = q("Use TLS/SSL on connect (ssl/starttls/no)", "UH_SMTP_SECURE", "starttls").strip().lower()
+    user = q("SMTP username", "UH_SMTP_USER", defaults["user"]).strip()
+    if not user:
+        die("SMTP username is required")
+    pwd = os.environ.get("UH_SMTP_PASS", "").strip()
+    existing_has_pass = bool(cur.get("hasPass"))
+    if not pwd and sys.stdin.isatty():
+        if existing_has_pass:
+            keep = input("Keep existing SMTP password? [y/N]: ").strip().lower()
+            if keep in ("y", "yes"):
+                pwd = None  # sentinel: untouched
+            else:
+                pwd = getpass.getpass("New SMTP password: ")
+        else:
+            pwd = getpass.getpass("SMTP password: ")
+    if pwd == "":
+        pwd = None  # do not clear unless explicitly asked
+    from_ = q("'From' address", "UH_SMTP_FROM", default=defaults["from"] or user).strip() or user
+
+    smtp = {
+        "host": host,
+        "port": port,
+        "user": user,
+        "from": from_,
+        "secure": secure in ("ssl", "tls"),  # ssl/tls => implicit TLS; starttls/no => upgrade on connect
+    }
+    if pwd is not None:
+        smtp["pass"] = pwd
+
+    _put_providers(api, token, {"smtp": smtp})
+    info(f"SMTP saved: {host}:{port} as {user} from {from_}.")
+
+    test = os.environ.get("UH_SMTP_TEST", "").strip().lower()
+    if not test and sys.stdin.isatty():
+        test = input("Send a test email now? [y/N]: ").strip().lower()
+    if test in ("y", "yes"):
+        _smtp_send_test(host, port, smtp.get("secure"), user, pwd, from_)
+    return True
+
+
+def _smtp_send_test(host, port, secure, user, pwd, from_):
+    """Reference listener for sending an SMTP test message. Prefers the stdlib
+    `smtplib` when present; otherwise prints the exact values so the admin can
+    test in their own client."""
+    try:
+        import smtplib
+        from email.mime.text import MIMEText
+    except Exception:
+        warn("smtplib not available — test send unavailable.")
+        return
+    to = q("Recipient email for the test message", "UH_SMTP_TEST_TO", from_).strip()
+    if not to:
+        warn("no recipient — skipping test send")
+        return
+    msg = MIMEText(
+        "This is a test message from UptimeHost setup.py.\n\n"
+        "If you received this, your SMTP configuration is working.\n"
+    )
+    msg["Subject"] = "[UptimeHost] SMTP test"
+    msg["From"] = from_
+    msg["To"] = to
+    try:
+        if secure:
+            s = smtplib.SMTP_SSL(host, port, timeout=20)
+        else:
+            s = smtplib.SMTP(host, port, timeout=20)
+            s.starttls()
+        if user:
+            s.login(user, pwd or "")
+        s.sendmail(from_, [to], msg.as_string())
+        s.quit()
+        info(f"Test email sent to {to}.")
+    except Exception as e:
+        warn(f"test send failed: {e}")
+
+
+def configure_google():
+    """[8] Configure Google OAuth sign-in via the API."""
+    info("Configure Google OAuth sign-in")
+    api, token = _panel_login()
+    cur = _get_providers(api, token).get("google", {})
+    client_id = os.environ.get("UH_GOOGLE_CLIENT_ID", "").strip()
+    if not client_id and sys.stdin.isatty():
+        client_id = input("Google OAuth Client ID: ").strip()
+    if not client_id:
+        die("Google Client ID is required (set UH_GOOGLE_CLIENT_ID in non-TTY mode)")
+    secret = os.environ.get("UH_GOOGLE_CLIENT_SECRET", "").strip()
+    if not secret and sys.stdin.isatty():
+        secret = getpass.getpass("Google OAuth Client Secret: ")
+    redirect = os.environ.get("UH_GOOGLE_REDIRECT", "").strip() or cur.get("redirectUri") or ""
+    if not redirect and sys.stdin.isatty():
+        redirect = input(f"Authorized redirect URI [{redirect if redirect else 'https://<panel>/api/auth/oauth/google'}]: ").strip()
+    if not redirect:
+        redirect = api + "/api/auth/oauth/google"
+    google = {"clientId": client_id, "clientSecret": secret or None, "redirectUri": redirect}
+    _put_providers(api, token, {"google": google})
+    info(f"Google OAuth save OK. Add this to your Google Cloud OAuth client:")
+    print("    Authorized redirect URI: " + redirect)
+    return True
+
+
+def configure_github():
+    """[9] Configure GitHub OAuth sign-in via the API."""
+    info("Configure GitHub OAuth sign-in")
+    api, token = _panel_login()
+    cur = _get_providers(api, token).get("github", {})
+    client_id = os.environ.get("UH_GITHUB_CLIENT_ID", "").strip()
+    if not client_id and sys.stdin.isatty():
+        client_id = input("GitHub OAuth Client ID: ").strip()
+    if not client_id:
+        die("GitHub Client ID is required (set UH_GITHUB_CLIENT_ID in non-TTY mode)")
+    secret = os.environ.get("UH_GITHUB_CLIENT_SECRET", "").strip()
+    if not secret and sys.stdin.isatty():
+        secret = getpass.getpass("GitHub OAuth Client Secret: ")
+    redirect = os.environ.get("UH_GITHUB_REDIRECT", "").strip() or cur.get("redirectUri") or ""
+    if not redirect and sys.stdin.isatty():
+        redirect = input(f"Authorized redirect URI [{redirect if redirect else 'https://<panel>/api/auth/oauth/github'}]: ").strip()
+    if not redirect:
+        redirect = api + "/api/auth/oauth/github"
+    github = {"clientId": client_id, "clientSecret": secret or None, "redirectUri": redirect}
+    _put_providers(api, token, {"github": github})
+    info(f"GitHub OAuth save OK. Add this redirect to your GitHub OAuth App:")
+    print("    Authorization callback URL: " + redirect)
+    return True
+
+
+def configure_auth_all():
+    """[10] Configure SMTP + Google + GitHub in one guided pass."""
+    info("Auto-configure all auth providers (SMTP + Google + GitHub)")
+    api, token = _panel_login()
+    info("Connected to panel OK — collecting credentials.")
+    want = {"smtp": True, "google": False, "github": False}
+    if sys.stdin.isatty():
+        for k, label in (("smtp", "SMTP"), ("google", "Google OAuth"), ("github", "GitHub OAuth")):
+            a = input(f"Configure {label}? [y/N]: ").strip().lower()
+            want[k] = a in ("y", "yes")
+    if want["smtp"]:
+        configure_smtp()
+    if want["google"]:
+        configure_google()
+    if want["github"]:
+        configure_github()
+    info("Auth-provider configuration complete.")
+    return True
+
+
+# ---------------------------------------------------------------------------
+# Predefined / customizable download scripts.
+#
+# setup.py can emit ready-to-run shell scripts that carry the operator's own
+# credentials / addresses baked in. Choose a template, fill in the blanks, and
+# the generated file is written locally (or printed for copy/paste). This
+# removes the "copy-paste manual steps" friction for connecting nodes or
+# configuring the panel on a fresh host.
+# ---------------------------------------------------------------------------
+SCRIPT_TEMPLATES = {
+    "node-agent": {
+        "file": "install-node-agent.sh",
+        "desc": "Connect a fresh VPS as a panel node (builds agent + systemd service)",
+        "help": "Fill PANEL_URL, PANEL_EMAIL, PANEL_PASSWORD and AGENT_HOST, then run the script on the node.",
+        "env": {
+            "PANEL_URL": "https://panel.example.com",
+            "PANEL_EMAIL": "you@example.com",
+            "PANEL_PASSWORD": "",
+            "AGENT_HOST": "testn.example.com",
+            "AGENT_PORT": "7373",
+            "NODE_MEMORY_MB": "8192",
+            "NODE_DISK_GB": "100",
+        },
+        "body": """#!/usr/bin/env bash
+# UptimeHost — connect this machine as a panel node (auto-generate from setup.py)
+set -euo pipefail
+REPO_URL="${UH_REPO_URL:-https://github.com/ProPlayer777bug/uptpanel.git}"
+
+PANEL_URL="${PANEL_URL:-__PANEL_URL__}"
+PANEL_EMAIL="${PANEL_EMAIL:-__PANEL_EMAIL__}"
+PANEL_PASSWORD="${PANEL_PASSWORD:-__PANEL_PASSWORD__}"
+AGENT_HOST="${AGENT_HOST:-__AGENT_HOST__}"
+AGENT_PORT="${AGENT_PORT:-__AGENT_PORT__}"
+NODE_MEMORY_MB="${NODE_MEMORY_MB:-__NODE_MEMORY_MB__}"
+NODE_DISK_GB="${NODE_DISK_GB:-__NODE_DISK_GB__}"
+
+say()  { printf '\\033[1;36m[UH]\\033[0m %s\\n' "$*"; }
+fail() { printf '\\033[1;31m[UH] error:\\033[0m %s\\n' "$*" >&2; exit 1; }
+
+command -v git >/dev/null || sudo apt-get update && sudo apt-get install -y git
+command -v go  >/dev/null || sudo apt-get install -y golang-go || fail "install Go first"
+
+if [ ! -d "$HOME/uptimehost/.git" ]; then
+  git clone --depth 1 "$REPO_URL" "$HOME/uptimehost"
+else
+  (cd "$HOME/uptimehost" && git pull --ff-only)
+fi
+
+cd "$HOME/uptimehost"
+PANEL_URL="$PANEL_URL" UH_PANEL_EMAIL="$PANEL_EMAIL" UH_PANEL_PASSWORD="$PANEL_PASSWORD" \\
+  UH_AGENT_HOST="$AGENT_HOST" UH_AGENT_PORT="$AGENT_PORT" \\
+  UH_NODE_MEMORY="$NODE_MEMORY_MB" UH_NODE_DISK="$NODE_DISK_GB" \\
+  UH_RUN_INSTALL=yes UH_OPT=2 python3 setup.py
+
+say "Node agent configured on $AGENT_HOST:$AGENT_PORT for $PANEL_URL"
+""",
+    },
+    "panel-https": {
+        "file": "setup-panel-https.sh",
+        "desc": "Issue a Let's Encrypt certificate and reverse-proxy the panel over HTTPS",
+        "help": "Fill PANEL_FQDN and optionally the cert email, then run as root on the panel host.",
+        "env": {
+            "PANEL_FQDN": "panel.example.com",
+            "PANEL_EMAIL": "you@example.com",
+            "PANEL_WEB_PORT": "8080",
+        },
+        "body": """#!/usr/bin/env bash
+# UptimeHost — put the panel behind HTTPS with a Let's Encrypt cert.
+set -euo pipefail
+PANEL_FQDN="${PANEL_FQDN:-__PANEL_FQDN__}"
+PANEL_EMAIL="${PANEL_EMAIL:-__PANEL_EMAIL__}"
+PANEL_WEB_PORT="${PANEL_WEB_PORT:-__PANEL_WEB_PORT__}"
+
+say()  { printf '\\033[1;36m[UH]\\033[0m %s\\n' "$*"; }
+fail() { printf '\\033[1;31m[UH] error:\\033[0m %s\\n' "$*" >&2; exit 1; }
+
+sudo apt-get update
+sudo apt-get install -y nginx certbot python3-certbot-nginx
+
+sudo tee /etc/nginx/sites-available/uptimehost-https >/dev/null <<EOF
+server {
+    server_name {PANEL_FQDN};
+    location / {
+        proxy_pass http://127.0.0.1:$PANEL_WEB_PORT;
+        proxy_set_header Host \\$host;
+        proxy_set_header X-Real-IP \\$remote_addr;
+        proxy_set_header X-Forwarded-For \\$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \\$scheme;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade \\$http_upgrade;
+        proxy_set_header Connection "upgrade";
+    }
+}
+EOF
+sudo ln -sf /etc/nginx/sites-available/uptimehost-https /etc/nginx/sites-enabled/uptimehost-https
+sudo nginx -t && sudo systemctl reload nginx
+
+sudo certbot --nginx -d {PANEL_FQDN} --redirect --agree-tos \\
+  -m {PANEL_EMAIL} --non-interactive || true
+say "Panel HTTPS ready at https://{PANEL_FQDN}"
+""",
+    },
+    "backup-data": {
+        "file": "backup-panel-data.sh",
+        "desc": "Back up the panel's JSON data store and web build to a timestamped tarball",
+        "help": "Set UH_DATA_DIR to the panel's .uh-data folder; run on the panel host.",
+        "env": {
+            "UH_DATA_DIR": "/root/uptimehost/.uh-data",
+            "UH_BACKUP_DIR": "/root/backups",
+        },
+        "body": """#!/usr/bin/env bash
+# UptimeHost — compact backup of panel state.
+set -euo pipefail
+DATA_DIR="${UH_DATA_DIR:-/root/uptimehost/.uh-data}"
+OUT_DIR="${UH_BACKUP_DIR:-/root/backups}"
+STAMP="$(date +%Y%m%d-%H%M%S)"
+mkdir -p "$OUT_DIR"
+tar -czf "$OUT_DIR/uptimehost-$STAMP.tar.gz" -C "$DATA_DIR" .
+echo "Backup written to $OUT_DIR/uptimehost-$STAMP.tar.gz"
+""",
+    },
+}
+
+
+def generate_scripts():
+    """[11] Generate a predefined/downloadable script, customized with the
+    operator's own credentials/addresses."""
+    info("Generate a ready-to-run script (credentials baked in)")
+    choices = list(SCRIPT_TEMPLATES)
+    if sys.stdin.isatty():
+        print()
+        print("Available script templates:")
+        for i, key in enumerate(choices, 1):
+            t = SCRIPT_TEMPLATES[key]
+            print(f"  {i}. {t['file']} — {t['desc']}")
+        try:
+            sel = input("Select a template number: ").strip()
+        except (EOFError, KeyboardInterrupt):
+            sel = ""
+        if sel.isdigit() and 1 <= int(sel) <= len(choices):
+            key = choices[int(sel) - 1]
+        else:
+            warn("invalid selection; using first template")
+            key = choices[0]
+    else:
+        key = os.environ.get("UH_SCRIPT_TEMPLATE", "node-agent")
+        if key not in SCRIPT_TEMPLATES:
+            die(f"unknown template '{key}' (choose from: {', '.join(SCRIPT_TEMPLATES)})")
+
+    tpl = SCRIPT_TEMPLATES[key]
+    print()
+    info(f"Template: {tpl['file']}")
+    print("  " + tpl["help"])
+    fills = {}
+    env_prefix = "UH_SCRIPT_"
+    for var, default in tpl["env"].items():
+        envkey = env_prefix + var
+        if default.endswith(".example.com") or default.endswith(".com"):
+            default = ""
+        val = os.environ.get(envkey, "").strip()
+        if not val and sys.stdin.isatty():
+            try:
+                val = input(f"{var} [{default}] : ").strip()
+            except (EOFError, KeyboardInterrupt):
+                val = ""
+        if not val and not default:
+            die(f"'{var}' required — set {envkey} (no value provided)", 2)
+        fills[var] = val or default
+
+    text = tpl["body"]
+    for var, default in tpl["env"].items():
+        text = text.replace(f"__{var}__", fills.get(var) or default or "")
+
+    out = os.path.join(REPO_DIR, tpl["file"])
+    with open(out, "w") as f:
+        f.write(text + "\n")
+    if not WIN:
+        os.chmod(out, 0o755)
+    info(f"Generated script written to {out}")
+    print("-" * 72)
+    print(text)
+    print("-" * 72)
+    print("Run it with:  bash " + out)
+    return True
+
+
+# ---------------------------------------------------------------------------
 # menu
 # ---------------------------------------------------------------------------
 MENU = [
@@ -704,6 +1113,11 @@ MENU = [
     ("Uninstall node", uninstall_node),
     ("Install requirements", install_requirements),
     ("Add admin user/pass", add_admin),
+    ("Configure SMTP", configure_smtp),
+    ("Configure Google OAuth", configure_google),
+    ("Configure GitHub OAuth", configure_github),
+    ("Configure all auth (SMTP+Google+GitHub)", configure_auth_all),
+    ("Generate & customize script", generate_scripts),
 ]
 
 
@@ -740,7 +1154,7 @@ def main():
         arg = args[0]
         if arg.isdigit() and arg != "0":
             return run_option(int(arg))
-        err("usage: python3 setup.py [1-6]  (or set UH_OPT=1..6)")
+        err("usage: python3 setup.py [1-%d]  (or set UH_OPT=1..%d)" % (len(MENU), len(MENU)))
         return 1
     opt = os.environ.get("UH_OPT", "").strip()
     if opt.isdigit() and opt != "0":
