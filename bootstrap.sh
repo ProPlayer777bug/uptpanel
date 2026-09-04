@@ -107,9 +107,12 @@ fi
 #   UH_ADMIN_PASSWORD            set the admin password explicitly
 #   UH_ADMIN_EMAIL               admin login email
 #   UH_UFW_ENABLE                yes to also run `ufw enable`
-if [ -n "${UH_PANEL_MODE:-}" ] && [ -z "${UH_OPT:-}" ]; then
-  export UH_OPT=1
-  say "Unattended mode — running full panel install (UH_OPT=1)."
+#   UH_OPT=1                     run the numbered setup.py option (default 1)
+if [ -n "${UH_PANEL_MODE:-}" ]; then
+  say "Unattended mode — running full panel install."
+  # Pass the option as a positional argument (robust, no env-propagation quirk);
+  # other UH_* vars still flow through the environment for setup.py to read.
+  python3 setup.py "${UH_OPT:-1}" "$@"
+else
+  python3 setup.py "$@"
 fi
-
-python3 setup.py "$@"
