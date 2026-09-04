@@ -1,6 +1,7 @@
 import { useEffect, useRef } from 'react'
 import { useApp } from '../state/auth'
 import { useTheme } from '../theme/useTheme'
+import { usePalette, PALETTES } from '../theme/themes'
 import { Icon } from '../components/ui'
 import { ApiKeys } from '../components/ApiKeys'
 import { Shell } from '../components/Shell'
@@ -8,6 +9,7 @@ import { Shell } from '../components/Shell'
 export function Account({ focus }: { focus?: string }) {
   const { user } = useApp()
   const { mode, applyMode } = useTheme()
+  const { palette, setPalette } = usePalette()
   const u = user || { name: '', email: '', role: '', avatarHue: 0, createdAt: 0, id: '' }
   const apiKeysRef = useRef<HTMLDivElement>(null)
 
@@ -51,6 +53,23 @@ export function Account({ focus }: { focus?: string }) {
                 <div className="flex gap-2">
                   {(['dark', 'light', 'system'] as const).map((m) => (
                     <button key={m} className={`btn ${mode === m ? 'subtle' : 'ghost'}`} onClick={() => applyMode(m)}>{m}</button>
+                  ))}
+                </div>
+              </div>
+              <div className="field">
+                <label>Color theme</label>
+                <div className="theme-grid">
+                  {PALETTES.map((p) => (
+                    <button
+                      key={p.id}
+                      className={`theme-swatch ${palette === p.id ? 'active' : ''}`}
+                      title={p.name}
+                      onClick={() => setPalette(p.id)}
+                    >
+                      <span className="sw-dot" style={{ background: `linear-gradient(135deg, ${p.primary}, ${p.accent})` }} />
+                      <span className="sw-name">{p.name}</span>
+                      {palette === p.id && <span className="sw-check">✓</span>}
+                    </button>
                   ))}
                 </div>
               </div>
