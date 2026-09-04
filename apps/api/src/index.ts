@@ -565,7 +565,9 @@ const VALID_TRANSITIONS: Record<string, string[]> = {
   restarting: ['running', 'error', 'stopping', 'killing', 'offline'],
   killing: ['offline', 'error'],
   suspended: ['starting', 'offline', 'error', 'restarting'],
-  error: ['offline', 'starting', 'restarting', 'provisioning'],
+  // An errored server must always be recoverable: allow start, restart, stop,
+  // kill, and offline so the operator can retry or clean up.
+  error: ['offline', 'starting', 'restarting', 'stopping', 'killing', 'provisioning', 'suspended'],
 }
 function canTransition(from: string, to: string): boolean {
   if (from === to) return true
@@ -1400,6 +1402,7 @@ app.post('/api/servers/:id/version', async (req, reply) => {
   const client = agentFor(node)
   if (!client) return reply.code(409).send({ ok: false, error: 'NODE_UNREACHABLE' })
 
+  const wasRunning = server.state !== 'offline' && server.state !== 'stopping' && server.state !== 'suspended'
   server.state = 'restarting'
   store.persist()
   hub.to(`srv:${id}`, { type: 'server-update', data: server })
@@ -1424,14 +1427,23 @@ app.post('/api/servers/:id/version', async (req, reply) => {
       await client.remove(id)
       await client.createContainer(buildManifest(server))
     }
+    // Settle the state: after a version swap (jar replaced / container recreated)
+    // the node holds a stopped container, so the server is offline until started.
+    server.state = 'offline'
+    server.startedAt = null
+    server.error = undefined
+    server.lastAction = 'version'
+    store.persist()
     pushTerminal(id, `[version] now on ${resolved.name} — server ready to start`, 'info')
     activity(user, 'server', 'info', `Changed ${server.name} to Minecraft ${resolved.name}`, { serverId: id })
     audit(store, user.name, 'CHANGE_VERSION', `server:${server.name} -> ${resolved.name}`)
     hub.to(`srv:${id}`, { type: 'server-update', data: server })
     return { ok: true, server: withRelations(server) }
   } catch (e: any) {
-    server.state = 'error'
+    // A failed version swap must not brick the server: keep it recoverable.
+    server.state = server.state === 'offline' ? 'offline' : 'error'
     server.error = String(e?.message || e)
+    server.startedAt = null
     store.persist()
     hub.to(`srv:${id}`, { type: 'server-update', data: server })
     return reply.code(500).send({ ok: false, error: 'VERSION_CHANGE_FAILED', message: String(e?.message || e) })
