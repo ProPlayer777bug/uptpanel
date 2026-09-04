@@ -2,16 +2,21 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { api } from './client'
 import type { Server, Node, Location, Blueprint } from '@uptimehost/types'
 
-export function usePoll<T>(fetcher: () => Promise<T>, deps: unknown[] = [], interval = 8000) {
+export function usePoll<T>(fetcher: () => Promise<T>, deps: unknown[] = [], interval = 8000, enabled = true) {
   const [data, setData] = useState<T | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const cb = useRef(fetcher)
   cb.current = fetcher
+  const enabledRef = useRef(enabled)
+  enabledRef.current = enabled
   const depsKey = JSON.stringify(deps)
 
   useEffect(() => {
     let alive = true
+    // When disabled (e.g. a non-admin shouldn't poll admin-only endpoints),
+    // don't fire the request at all — avoids needless 403s in the console.
+    if (!enabledRef.current) { setLoading(false); return () => { alive = false } }
     const run = async () => {
       try {
         const d = await cb.current()
@@ -27,13 +32,13 @@ export function usePoll<T>(fetcher: () => Promise<T>, deps: unknown[] = [], inte
     run()
     // A non-positive interval means "fetch once", never poll. A bare
     // setInterval(fn, 0) would hammer the API and blow past rate limits.
-    if (interval > 0) {
+    if (interval > 0 && enabledRef.current) {
       const t = setInterval(run, interval)
       return () => { alive = false; clearInterval(t) }
     }
     return () => { alive = false }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [depsKey, interval])
+  }, [depsKey, interval, enabled])
 
   return {
     data, loading, error,
@@ -41,6 +46,7 @@ export function usePoll<T>(fetcher: () => Promise<T>, deps: unknown[] = [], inte
     // (immediately, without waiting for the next poll tick). Used by manual
     // "Refresh" buttons and onSaved/onDone handlers across the app.
     refetch: useCallback(async () => {
+      if (!enabledRef.current) return
       setLoading(true)
       try {
         const d = await cb.current()
@@ -59,8 +65,8 @@ export function useServers() {
   return { servers: data?.servers ?? [], summary: data?.summary ?? null, ...rest }
 }
 
-export function useNodes() {
-  const { data, ...rest } = usePoll<{ nodes: Node[]; locations: Location[] }>(async () => api.get('/nodes'))
+export function useNodes(enabled = true) {
+  const { data, ...rest } = usePoll<{ nodes: Node[]; locations: Location[] }>(async () => api.get('/nodes'), [], 8000, enabled)
   return { nodes: data?.nodes ?? [], locations: data?.locations ?? [], ...rest }
 }
 

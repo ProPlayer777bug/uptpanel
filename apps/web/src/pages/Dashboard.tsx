@@ -10,7 +10,7 @@ function barPct(v: number) { return Math.min(100, Math.max(0, v)) }
 export function Dashboard() {
   const { summary, user, canAdmin } = useApp()
   const { servers, loading } = useServers()
-  const { nodes } = useNodes()
+  const { nodes } = useNodes(canAdmin)
   const { data: activityData, loading: activityLoading } = useActivity(12)
   const navigate = useNavigate()
 

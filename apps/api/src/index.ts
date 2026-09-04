@@ -14,7 +14,7 @@ import { WsHub } from './ws/hub.js'
 import { randomBytes } from 'node:crypto'
 import { nanoid } from 'nanoid'
 import { requireAuth, createSession, verifyPw, hashPw, can, audit, isGlobalAdmin, serverAccess, generateKeyToken } from './modules/auth.js'
-import { issueOtp, verifyOtp, sendOtp, oauthAuthorizeUrl, oauthCallback, oauthCallbackUrl, appBaseUrl, providerFlags, getAuthSettings, setAuthSettings, publicAuthSettings } from './modules/providers.js'
+import { issueOtp, verifyOtp, sendOtp, oauthAuthorizeUrl, oauthCallback, oauthCallbackUrl, appBaseUrl, providerFlags, getAuthSettings, setAuthSettings, publicAuthSettings, validateOAuthState } from './modules/providers.js'
 import { AgentClient, agentFor } from './modules/agentClient.js'
 import { sshProbe, sshInstall } from './modules/sshConnect.js'
 import { startMCVersionWatcher, currentDefaults, javaImage, mcState, refreshMCManifest } from './modules/mcVersions.js'
@@ -245,6 +245,11 @@ app.get('/api/auth/oauth/:provider', async (req, reply) => {
   const code = String(q.code || '')
   if (!code) {
     return reply.redirect(`${baseUrl}/oauth/callback/${provider}?error=${encodeURIComponent('missing authorization code')}`)
+  }
+  // CSRF protection: the state nonce must match one this server issued for the
+  // callback. Rejects forged/replayed callbacks.
+  if (!validateOAuthState(q.state, provider)) {
+    return reply.redirect(`${baseUrl}/oauth/callback/${provider}?error=${encodeURIComponent('invalid state')}`)
   }
   let info: any
   try {
@@ -518,10 +523,31 @@ function publicUser(u: any) {
   return rest
 }
 function activity(user: any, kind: string, severity: string, message: string, extra: any = {}) {
-  store.db.activity.unshift({ id: nanoid(10), ts: Date.now(), kind, severity, message, actor: user?.name || 'system', ...extra })
+  const item = { id: nanoid(10), ts: Date.now(), kind, severity, message, actor: user?.name || 'system', actorId: user?.id, ...extra }
+  store.db.activity.unshift(item)
   if (store.db.activity.length > 500) store.db.activity.length = 500
   store.persist()
-  hub.to('all', { type: 'activity', data: store.db.activity[0] })
+  // Live broadcast, scoped so simple users only receive activity for servers
+  // they can access or their own actions (not everyone's).
+  hub.broadcastActivity(item, (u) => canSeeActivity(u, item))
+}
+
+// Whether a user may see a given activity record. Global admins see everything.
+// Regular users only see their own actions and events on servers they can access.
+function canSeeActivity(user: any, item: any): boolean {
+  if (isGlobalAdmin(user)) return true
+  if (!user) return false
+  // own actions (auth, or anything they explicitly performed)
+  if (item.actorId && item.actorId === user.id) return true
+  if (item.userId && item.userId === user.id) return true
+  // server-scoped events: only if the user has access to that server
+  if (item.serverId) {
+    const server = store.db.servers.find((s) => s.id === item.serverId)
+    if (server && serverAccess(user, server, store).ok) return true
+    return false
+  }
+  // non-server events with no own-actor match (node/admin/etc.) stay hidden
+  return false
 }
 
 // ---------------------------------------------------------------------------
@@ -2624,7 +2650,9 @@ app.get('/api/activity', async (req) => {
   const user = me(req)
   if (!user) return { ok: false, error: 'UNAUTHENTICATED' }
   const kind = (req.query as any)?.kind
-  let items = store.db.activity
+  // Scope activity by role: admins see everything; regular users only see their
+  // own actions and events on servers they can access.
+  let items = store.db.activity.filter((a) => canSeeActivity(user, a))
   if (kind && kind !== 'all') items = items.filter((a) => a.kind === kind)
   return { ok: true, activity: items.slice(0, 100) }
 })
@@ -2663,7 +2691,8 @@ function summarize(user?: any) {
 // ---------------------------------------------------------------------------
 app.register(async (app) => {
   app.get('/ws', { websocket: true }, (socket, req) => {
-    const client = hub.add(socket)
+    const queryToken = ((req as any).query && (req as any).query.token) as string | undefined
+    const client = hub.add(socket, queryToken ? meFromToken(store, queryToken) : null)
     socket.on('message', (raw: Buffer) => {
       try {
         const msg = JSON.parse(String(raw))

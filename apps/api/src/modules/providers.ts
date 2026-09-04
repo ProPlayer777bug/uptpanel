@@ -277,10 +277,30 @@ async function githubExchange(cfg: NonNullable<AuthSettings['github']>, code: st
     body: JSON.stringify({ client_id: cfg.clientId!, client_secret: cfg.clientSecret!, code, redirect_uri: redirectUri }),
   })
   const tok = await tokenRes.json().catch(() => ({})) as any
+  // Do not surface the access token; it's only used server-side for the calls below.
   if (!tok.access_token) throw new Error('GitHub token exchange failed')
-  const infoRes = await fetch('https://api.github.com/user', { headers: { Authorization: `Bearer ${tok.access_token}`, 'User-Agent': 'uptimehost' } })
+  const auth = { Authorization: `Bearer ${tok.access_token}`, 'User-Agent': 'uptimehost', Accept: 'application/vnd.github+json' }
+  const infoRes = await fetch('https://api.github.com/user', { headers: auth })
+  if (!infoRes.ok) throw new Error(`GitHub user API error (${infoRes.status})`)
   const info = await infoRes.json().catch(() => ({})) as any
-  return { email: String(info.email || '').toLowerCase(), name: info.name || info.login || 'GitHub User', avatar: info.avatar_url || '' }
+
+  // GitHub's /user only includes `email` when the user made it public. To get a
+  // usable verified email (required to build an UptimeHost account), query
+  // /user/emails and pick the primary verified address. Scope `user:email` is
+  // already requested in the authorize URL.
+  let email = String(info.email || '').toLowerCase()
+  if (!email) {
+    try {
+      const emailsRes = await fetch('https://api.github.com/user/emails', { headers: auth })
+      if (emailsRes.ok) {
+        const emails = await emailsRes.json().catch(() => []) as any[]
+        const pick = emails.find((e) => e && e.verified && e.primary) || emails.find((e) => e && e.verified)
+        if (pick && pick.email) email = String(pick.email).toLowerCase()
+      }
+    } catch { /* leave email empty; route will surface OAUTH_NO_EMAIL */ }
+  }
+
+  return { email, name: info.name || info.login || 'GitHub User', avatar: info.avatar_url || '' }
 }
 
 // ---------------------------------------------------------------------------
@@ -311,10 +331,13 @@ export async function sendOtp(store: Store, target: string, channel: 'email' | '
 export function oauthAuthorizeUrl(provider: 'google' | 'github', store: Store, baseUrl?: string): string {
   const s = getAuthSettings(store)
   const base = baseUrl || appBaseUrl()
+  // CSRF protection: generate a random state nonce, remember it (with TTL), and
+  // verify it on the callback. It is never persisted or logged.
+  const state = nanoid(24)
+  registerOAuthState(state, provider)
   if (provider === 'google') {
     const c = s.google!
     const redirectUri = resolveRedirectUri('google', s, base)
-    const state = nanoid(24)
     const p = new URLSearchParams({
       client_id: c.clientId!, redirect_uri: redirectUri, response_type: 'code',
       scope: 'openid email profile', state, prompt: 'select_account',
@@ -323,8 +346,38 @@ export function oauthAuthorizeUrl(provider: 'google' | 'github', store: Store, b
   }
   const c = s.github!
   const redirectUri = resolveRedirectUri('github', s, base)
-  const p = new URLSearchParams({ client_id: c.clientId!, redirect_uri: redirectUri, scope: 'read:user user:email' })
+  const p = new URLSearchParams({ client_id: c.clientId!, redirect_uri: redirectUri, scope: 'read:user user:email', state })
   return `https://github.com/login/oauth/authorize?${p.toString()}`
+}
+
+// ---------------------------------------------------------------------------
+// OAuth state (CSRF) validation
+// ---------------------------------------------------------------------------
+// Short-lived, in-memory store of pending OAuth state nonces. Fastify here is
+// single-process, so in-memory is correct; entries expire after 10 minutes and
+// are consumed (removed) on first use to prevent replay.
+const pendingStates = new Map<string, { provider: string; exp: number }>()
+const STATE_TTL = 10 * 60 * 1000
+
+function registerOAuthState(state: string, provider: string) {
+  pruneOAuthStates()
+  pendingStates.set(state, { provider, exp: Date.now() + STATE_TTL })
+}
+
+function pruneOAuthStates() {
+  const now = Date.now()
+  for (const [k, v] of pendingStates) if (v.exp < now) pendingStates.delete(k)
+}
+
+// Returns true iff the state nonce was issued for this provider and hasn't
+// expired; consumes it on success so it can't be replayed.
+export function validateOAuthState(state: string | undefined, provider: string): boolean {
+  if (!state) return false
+  pruneOAuthStates()
+  const rec = pendingStates.get(String(state))
+  if (!rec || rec.provider !== provider) return false
+  pendingStates.delete(String(state))
+  return true
 }
 
 export async function oauthCallback(store: Store, provider: 'google' | 'github', code: string, baseUrl?: string) {

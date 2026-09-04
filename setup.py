@@ -160,6 +160,21 @@ def log_file(name):
     return os.path.join(REPO_DIR, f"{name}.log")
 
 
+def tail_log(name, lines=20):
+    """Print the last N lines of a process log for diagnosing startup failures."""
+    path = log_file(name)
+    if not os.path.exists(path):
+        warn(f"no log file at {path}")
+        return
+    try:
+        with open(path) as fh:
+            all_lines = fh.read().splitlines()
+        for line in all_lines[-lines:]:
+            print(f"  | {line}")
+    except Exception as e:
+        warn(f"could not read log {path}: {e}")
+
+
 def read_pid(name):
     p = pid_file(name)
     if os.path.exists(p):
@@ -291,6 +306,16 @@ def install_agent_service(env, agent_bin):
 def install_requirements():
     info("Installing requirements...")
     require("npm", "install Node.js >= 18 from https://nodejs.org")
+    # Refuse to proceed on an unsupported (too old) Node — native-built deps
+    # (e.g. esbuild) fail cryptically otherwise, and the web build needs >=18.
+    try:
+        ver = subprocess.run(["node", "-v"], capture_output=True, text=True).stdout.strip()
+        major = int(ver.lstrip("v").split(".")[0])
+        if major < 18:
+            die(f"Node {ver} is too old — UptimeHost needs Node >= 18. Install Node 20 LTS and re-run.")
+        info(f"Node.js {ver} detected")
+    except Exception:
+        warn("could not parse node version; continuing")
     code, out = sh(["npm", "install"], cwd=REPO_DIR, capture=True)
     if code != 0:
         die("npm install failed:\n" + out)
@@ -387,6 +412,14 @@ def install_panel():
         cwd=REPO_DIR,
         env={"UH_WEB_PORT": WEB_PORT},
     )
+    if not wait_api(API_URL):
+        warn("the API did not answer /api/health yet — tailing the log for clues:")
+        tail_log("panel-api", lines=25)
+        if sys.stdin.isatty():
+            die("panel API failed to start; fix the error above and re-run")
+        warn("continuing anyway (API not confirmed up)")
+    else:
+        info("API is up and answering /api/health.")
     mode = os.environ.get("UH_PANEL_MODE", "").strip().lower()
     if not mode:
         if not sys.stdin.isatty():
@@ -588,6 +621,25 @@ def uninstall_node():
     stop_daemon("node-agent")
     info("Node agent uninstalled.")
     return True
+
+
+def wait_api(base, tries=30, delay=1.0, health="/api/health"):
+    """Poll the API until it is reachable, so install steps can rely on the
+    panel actually being up before they continue. Returns True on success."""
+    url = base.rstrip("/") + health
+    for i in range(1, tries + 1):
+        if not os.path.isfile(log_file("panel-api")):
+            pass
+        try:
+            req = urllib.request.Request(url, method="GET")
+            with urllib.request.urlopen(req, timeout=3) as r:
+                if r.status == 200:
+                    return True
+        except Exception:
+            pass
+        if i < tries:
+            time.sleep(delay)
+    return False
 
 
 def http_json(url, payload=None, token=None, method=None):
