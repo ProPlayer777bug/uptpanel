@@ -3,7 +3,6 @@ import { useParams, useNavigate } from 'react-router-dom'
 import { useServer } from '../../api/hooks'
 import { Spinner, StatePill, Icon, Tabs, Menu } from '../../components/ui'
 import { Shell } from '../../components/Shell'
-import { PowerControls } from './PowerControls'
 import { OverviewTab } from './OverviewTab'
 import { ConsoleTab } from './ConsoleTab'
 import { FilesTab } from './FilesTab'
@@ -85,7 +84,6 @@ export function ServerWorkspace() {
                 <button className="btn sm" onClick={() => setShowVersions(true)}><Icon name="activity" size={14} /> Version</button>
               </>
             )}
-            <PowerControls server={server} />
             <Menu trigger={<span className="nav-icon-btn"><Icon name="dots" size={16} /></span>} align="right"
               items={[{ label: 'Copy address', icon: 'copy', onClick: () => navigator.clipboard?.writeText(address) }]}
             />

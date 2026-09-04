@@ -1,7 +1,9 @@
 import { useEffect, useRef, useState, useCallback } from 'react'
-import { Icon } from '../../components/ui'
+import { Icon, toast } from '../../components/ui'
 import { api } from '../../api/client'
 import { getToken } from '../../api/client'
+import { powerAction } from '../../api/hooks'
+import { useApp } from '../../state/auth'
 import type { Server } from '@uptimehost/types'
 
 interface Line { id: number; kind: 'out' | 'in' | 'sys'; text: string; ts: number }
@@ -78,22 +80,75 @@ export function ConsoleTab({ server }: { server: Server }) {
   const [showSearch, setShowSearch] = useState(false)
   const [fullscreen, setFullscreen] = useState(false)
   const [liveStats, setLiveStats] = useState<{ cpuPercent?: number; memoryUsedMb?: number; pids?: number }>({})
+  const [powerBusy, setPowerBusy] = useState(false)
+  const [showKillConfirm, setShowKillConfirm] = useState(false)
+  const { refresh } = useApp()
   const pendingRef = useRef<Line[]>([])
   const wsRef = useRef<WebSocket | null>(null)
   const boxRef = useRef<HTMLDivElement>(null)
   const searchRef = useRef<HTMLInputElement>(null)
   const alive = useRef(true)
-  // `paused` is read through a ref so the `add` callback keeps a stable identity
-  // and the console websocket does NOT get torn down/reconnected just because the
-  // pause flag changed (which used to drop focus-free reconnects on every toggle).
   const pausedRef = useRef(paused)
   useEffect(() => { pausedRef.current = paused }, [paused])
+
+  const runPowerAction = async (action: 'start' | 'stop' | 'restart' | 'kill', fromConfirm = false) => {
+    if (action === 'kill' && !fromConfirm) { setShowKillConfirm(true); return }
+    if (fromConfirm) setShowKillConfirm(false)
+    setPowerBusy(true)
+    try {
+      await powerAction(server.id, action)
+      toast.ok(`${server.name}: ${action} triggered`)
+      refresh()
+      setTimeout(refresh, 1400)
+    } catch (e: any) {
+      toast.err(e?.message || `Failed to ${action}`)
+    } finally {
+      setPowerBusy(false)
+    }
+  }
+
+  // Message rate tracking for aggressive cleanup
+  const msgCountRef = useRef(0)
+  const msgTimeRef = useRef(Date.now())
+  const cleanupIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null)
 
   const add = useCallback((l: { kind: 'out' | 'in' | 'sys'; text: string }) => {
     if (!alive.current) return
     const line: Line = { ...l, id: ++seq, ts: Date.now() }
     if (pausedRef.current) { pendingRef.current.push(line); return }
-    setLines((prev) => [...prev.slice(-500), line])
+    
+    // Track message rate for aggressive cleanup
+    const now = Date.now()
+    if (now - msgTimeRef.current > 1000) {
+      msgCountRef.current = 0
+      msgTimeRef.current = now
+    }
+    msgCountRef.current++
+    
+    setLines((prev) => {
+      let next = [...prev, line]
+      // Keep max 500 lines
+      if (next.length > 500) next = next.slice(-500)
+      return next
+    })
+  }, [])
+
+  // Aggressive cleanup: if >5 msg/sec, remove top 10 every second
+  useEffect(() => {
+    cleanupIntervalRef.current = setInterval(() => {
+      if (msgCountRef.current > 5) {
+        setLines((prev) => prev.length > 10 ? prev.slice(10) : prev)
+      }
+    }, 1000)
+    return () => { if (cleanupIntervalRef.current) clearInterval(cleanupIntervalRef.current) }
+  }, [])
+
+  // Periodic cleanup: remove top 10 every 10 minutes
+  useEffect(() => {
+    const t = setInterval(() => {
+      setLines((prev) => prev.length > 10 ? prev.slice(10) : prev)
+    }, 10 * 60 * 1000)
+    return () => clearInterval(t)
   }, [])
 
   // Fetch the server's startup command so the console can render a
@@ -276,7 +331,7 @@ export function ConsoleTab({ server }: { server: Server }) {
     URL.revokeObjectURL(a.href)
   }
 
-  const running = server.state === 'running'
+  const running = server.state === 'running' || server.state === 'started' || server.state === 'restarting'
   const host = server.node?.name || '—'
   const a0 = server.allocations?.[0]
   const address = a0 ? `${a0.alias || a0.ip || host}:${a0.port}` : host
@@ -305,27 +360,6 @@ export function ConsoleTab({ server }: { server: Server }) {
           <button className="btn sm ghost icon" onClick={() => setTermSize(-1)} title="Decrease font"><Icon name="x" size={11} /></button>
           <span className="xs text-3 mono" style={{ width: 22, textAlign: 'center' }}>{fontSize}</span>
           <button className="btn sm ghost icon" onClick={() => setTermSize(1)} title="Increase font"><Icon name="plus" size={11} /></button>
-          <button className="btn sm ghost icon" onClick={() => setAutoScroll((v) => !v)} title={`Auto-scroll: ${autoScroll ? 'on' : 'off'}`}>
-            <Icon name="chevD" size={13} />
-          </button>
-          <button className="btn sm ghost icon" onClick={() => setPaused((v) => !v)} title={paused ? 'Resume' : 'Pause'}>
-            <Icon name={paused ? 'play' : 'stop'} size={13} />
-          </button>
-          <button className="btn sm ghost icon" onClick={() => setLines([])} title="Clear">
-            <Icon name="trash" size={13} />
-          </button>
-          <button className="btn sm ghost icon" onClick={copyConsole} title="Copy">
-            <Icon name="copy" size={13} />
-          </button>
-          <button className="btn sm ghost icon" onClick={reconnect} title="Reconnect">
-            <Icon name="restart" size={13} />
-          </button>
-          <button className="btn sm ghost icon" onClick={toggleFullscreen} title="Fullscreen">
-            <Icon name={fullscreen ? 'collapse' : 'expand'} size={13} />
-          </button>
-          <button className="btn sm" onClick={downloadConsole}>
-            <Icon name="download" size={13} /> Log
-          </button>
         </div>
 
         <div className="terminal" ref={boxRef} style={{ fontSize }}>
@@ -367,9 +401,37 @@ export function ConsoleTab({ server }: { server: Server }) {
         </div>
       </div>
 
-      {/* Sidebar — stat blocks */}
+      {/* Sidebar — buttons + stat blocks */}
       <div className="console-sidebar">
         <div style={{ display: 'grid', gap: 12 }}>
+          {/* Server Power Controls */}
+          <div className="sidebar-actions" style={{ display: 'flex', flexWrap: 'wrap', gap: 8, justifyContent: 'center' }}>
+            <button className="btn sm" disabled={powerBusy || running} onClick={() => runPowerAction('start')} title="Start"><Icon name="play" size={14} /> Start</button>
+            <button className="btn sm" disabled={powerBusy || !running} onClick={() => runPowerAction('restart')} title="Restart"><Icon name="restart" size={14} /> Restart</button>
+            <button className="btn sm" disabled={powerBusy || !running} onClick={() => runPowerAction('stop')} title="Stop"><Icon name="stop" size={14} /> Stop</button>
+            <button className="btn sm danger" disabled={powerBusy || !running} onClick={() => runPowerAction('kill')} title="Kill"><Icon name="power" size={14} /> Kill</button>
+            {showKillConfirm && (
+              <div className="card subtle p-2" style={{ width: '100%', textAlign: 'center' }}>
+                <div className="xs text-3 mb-2">Force kill <b>{server.name}</b>? Data loss possible.</div>
+                <div style={{ display: 'flex', gap: 8, justifyContent: 'center' }}>
+                  <button className="btn sm danger" onClick={() => runPowerAction('kill', true)} disabled={powerBusy}>{powerBusy ? 'Killing…' : 'Kill server'}</button>
+                  <button className="btn sm" onClick={() => setShowKillConfirm(false)} disabled={powerBusy}>Cancel</button>
+                </div>
+              </div>
+            )}
+          </div>
+
+          {/* Console Actions */}
+          <div className="sidebar-actions" style={{ display: 'flex', flexWrap: 'wrap', gap: 8, justifyContent: 'center' }}>
+            <button className="btn sm" onClick={reconnect} title="Reconnect"><Icon name="restart" size={14} /> Reconnect</button>
+            <button className="btn sm" onClick={() => setLines([])} title="Clear"><Icon name="trash" size={14} /> Clear</button>
+            <button className="btn sm" onClick={copyConsole} title="Copy"><Icon name="copy" size={14} /> Copy</button>
+            <button className="btn sm" onClick={downloadConsole}><Icon name="download" size={14} /> Log</button>
+            <button className="btn sm ghost" onClick={() => setPaused((v) => !v)} title={paused ? 'Resume' : 'Pause'}><Icon name={paused ? 'play' : 'stop'} size={14} /> {paused ? 'Resume' : 'Pause'}</button>
+            <button className="btn sm ghost" onClick={() => setAutoScroll((v) => !v)} title={`Auto-scroll: ${autoScroll ? 'on' : 'off'}`}><Icon name="chevD" size={14} /> Scroll</button>
+            <button className="btn sm ghost" onClick={toggleFullscreen} title="Fullscreen"><Icon name={fullscreen ? 'collapse' : 'expand'} size={14} /> FS</button>
+          </div>
+
           <StatBlock
             icon="globe"
             label="Address"

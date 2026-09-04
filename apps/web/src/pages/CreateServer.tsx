@@ -51,7 +51,8 @@ export function CreateServer({ onClose }: { onClose: () => void }) {
   useEffect(() => {
     if (blueprints.length && !bpId) setBpId(blueprints[0].id)
     if (!node && online.length) setNode(online[0])
-    setStep('name')
+    // NOTE: removed setStep('name') which was forcibly resetting the step
+    // on every dependency change, causing the navigation loop you observed.
   }, [blueprints, online, node, bpId])
 
   const bp: Blueprint | undefined = blueprints.find((b) => b.id === bpId)
@@ -122,7 +123,7 @@ export function CreateServer({ onClose }: { onClose: () => void }) {
             <input
               className="input"
               autoFocus
-              placeholder={bp ? `${bp.name} Server` : 'Give your server a name'}
+              placeholder="Give your server a name"
               value={name}
               onChange={(e) => setName(e.target.value)}
               onKeyDown={(e) => { if (e.key === 'Enter' && name.trim() && canNext) next() }}

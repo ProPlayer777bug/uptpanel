@@ -132,6 +132,49 @@ def die(msg, code=1):
     sys.exit(code)
 
 
+def tty_open():
+    """Return an open handle to the user's controlling terminal, or None.
+
+    stdin is a copy of the *piped* data when running `curl ... | sudo bash`, so
+    the interactive menus would otherwise die with EOF. Opening /dev/tty lets us
+    read the operator's real keypresses even in the piped case. Returns None when
+    there is genuinely no controlling terminal (fully headless)."""
+    try:
+        return open("/dev/tty", "r")
+    except OSError:
+        return None
+
+
+def tty_input(prompt=""):
+    """input() that still reads from the operator's terminal under `curl|bash`.
+
+    Prefers a controlling tty; falls back to stdin only when stdin itself is the
+    terminal (or there is none), so an automated run still EOFs/dies naturally
+    instead of hanging."""
+    sys.stdout.write(prompt)
+    sys.stdout.flush()
+    if sys.stdin.isatty():
+        try:
+            return input().strip()
+        except (EOFError, KeyboardInterrupt):
+            return ""
+    tty = tty_open()
+    if tty is None:
+        return ""  # no terminal -> EOF (caller dies/uses default)
+    try:
+        line = tty.readline()
+        return line.strip()
+    except (EOFError, KeyboardInterrupt):
+        return ""
+    finally:
+        tty.close()
+
+
+def tty_active():
+    """True when we can accept interactive input (stdin tty or a /dev/tty)."""
+    return sys.stdin.isatty() or tty_open() is not None
+
+
 def sh(cmd, cwd=None, env=None, capture=False):
     """Run a command; return (exit_code, stdout)."""
     base = dict(os.environ)
@@ -176,11 +219,10 @@ def param(label, env, state_key=None, default=None):
         val = default
     if val is not None:
         return str(val)
-    if not sys.stdin.isatty():
+    if not tty_active():
         die(f"'{label}' required — set env {env} (stdin is not a TTY)", 2)
-    try:
-        got = input(f"{label}: ").strip()
-    except (EOFError, KeyboardInterrupt):
+    got = tty_input(f"{label}: ")
+    if not got and not tty_active():
         die(f"'{label}' required — set env {env}", 2)
     return got or default
 
@@ -191,13 +233,13 @@ def q(label, env, default=None):
     val = os.environ.get(env, "")
     if val:
         return val
-    if sys.stdin.isatty():
+    if tty_active():
         try:
             suf = "" if default is None else f" [{default}]"
-            got = input(f"{label}{suf}: ").strip()
+            got = tty_input(f"{label}{suf}: ") or default
         except (EOFError, KeyboardInterrupt):
             return default
-        return got or default
+        return got
     if default is None:
         die(f"'{label}' required — set env {env} (stdin is not a TTY)", 2)
     return default
@@ -675,13 +717,13 @@ def install_panel():
     # ------------------------------------------------------------------
     auto_cred = os.environ.get("UH_ADMIN_AUTO", "").strip().lower() in ("1", "auto", "yes", "true")
     has_pw = bool(os.environ.get("UH_ADMIN_PASSWORD", "").strip())
-    no_tty = not sys.stdin.isatty()
+    no_tty = not tty_active()
     if auto_cred:
         cred_mode = "auto"
     elif has_pw:
         cred_mode = "env"
     elif no_tty:
-        cred_mode = "auto"  # piped (non-TTY) install -> generate a fresh random password
+        cred_mode = "auto"  # no terminal at all -> generate a fresh random password
     else:
         cred_mode = "prompt"
     admin_email, applied_pw, already_configured = rotate_default_admin(API_URL, cred_mode)
@@ -691,10 +733,10 @@ def install_panel():
     # ------------------------------------------------------------------
     mode = os.environ.get("UH_PANEL_MODE", "").strip().lower()
     if not mode:
-        if not sys.stdin.isatty():
-            mode = "http"  # no domain given via env on a non-TTY (piped) install
+        if not tty_active():
+            mode = "http"  # no terminal -> default to http
         else:
-            mode = input("Serve panel over http or https? [http/https]: ").strip().lower()
+            mode = tty_input("Serve panel over http or https? [http/https]: ").strip().lower()
     if mode not in ("http", "ip", "https"):
         mode = "https"
 
@@ -703,9 +745,9 @@ def install_panel():
         info(f"Detected public IPv4: {public_ip}")
 
     domain = os.environ.get("UH_PANEL_DOMAIN", "").strip() or os.environ.get("UH_PANEL_FQDN", "").strip()
-    if not domain and mode == "https" and sys.stdin.isatty():
+    if not domain and mode == "https" and tty_active():
         try:
-            domain = input(f"Panel domain (e.g. gp1.uptimehost.in) [{public_ip or ''}]: ").strip()
+            domain = tty_input(f"Panel domain (e.g. gp1.uptimehost.in) [{public_ip or ''}]: ")
         except (EOFError, KeyboardInterrupt):
             domain = ""
     if mode == "https" and not domain:
@@ -723,16 +765,16 @@ def install_panel():
                 info("Created/updated the A record via Cloudflare automatically.")
             elif os.environ.get("UH_CF_TOKEN", ""):
                 warn("Cloudflare token set but the A record could not be created — add it manually.")
-            elif sys.stdin.isatty():
-                card = input(f"Add an A record  @ -> {public_ip}  in your DNS panel now, then press Enter. (or type 'skip'): ")
+            elif tty_active():
+                card = tty_input(f"Add an A record  @ -> {public_ip}  in your DNS panel now, then press Enter. (or type 'skip'): ")
                 if card.strip().lower() in ("skip", "s"):
                     warn("skipping DNS check — HTTPS may not resolve yet")
         setup_panel_https(domain)
 
     # Open the ports used by the public panel + node agents.
     want_fw = os.environ.get("UH_OPEN_FIREWALL", "").strip().lower()
-    if not want_fw and sys.stdin.isatty() and mode != "ip":
-        want_fw = input("Open ports 80/443, API and 7373 (node agents) in the firewall? [y/N]: ").strip().lower()
+    if not want_fw and tty_active() and mode != "ip":
+        want_fw = tty_input("Open ports 80/443, API and 7373 (node agents) in the firewall? [y/N]: ").strip().lower()
     if want_fw in ("1", "y", "yes", "true"):
         open_firewall([80, 443, int(API_PORT), 7373])
 
@@ -771,10 +813,10 @@ def ensure_domain_https():
 
     domain = os.environ.get("UH_PANEL_DOMAIN", "").strip() or os.environ.get("UH_PANEL_FQDN", "").strip()
     if not domain:
-        if not sys.stdin.isatty():
+        if not tty_active():
             die("set UH_PANEL_DOMAIN (or UH_PANEL_FQDN) to configure the domain (stdin is not a TTY)", 2)
         default = "panel.uptimehost.in"
-        domain = input(f"Panel domain (e.g. panel.uptimehost.in) [{default}]: ").strip() or default
+        domain = tty_input(f"Panel domain (e.g. panel.uptimehost.in) [{default}]: ") or default
         domain = domain.strip().rstrip(".")
 
     if public_ip and not _dns_has_ip(domain, public_ip):
@@ -784,9 +826,9 @@ def ensure_domain_https():
         elif os.environ.get("UH_CF_TOKEN", ""):
             warn("Cloudflare token set but the A record could not be created — add it manually.")
         else:
-            if not sys.stdin.isatty():
+            if not tty_active():
                 die("add an A record  @ -> %s  manually, then re-run option 12" % public_ip, 2)
-            card = input(f"Add an A record  @ -> {public_ip}  in your DNS panel now, then press Enter. (or 'skip'): ")
+            card = tty_input(f"Add an A record  @ -> {public_ip}  in your DNS panel now, then press Enter. (or 'skip'): ")
             if card.strip().lower() in ("skip", "s"):
                 warn("skipping DNS check — HTTPS may not resolve yet")
 
@@ -1513,13 +1555,16 @@ def main():
             print(f"  {i}. {label}")
         print("  0. Exit")
         try:
-            choice = input("> ").strip()
+            choice = tty_input("> ")
         except KeyboardInterrupt:
             info("Bye.")
             return 0
         except EOFError:
             info("Bye.")
             return 0
+        if not choice and not tty_active():
+            info("no terminal for interactive input — run: python3 setup.py <option> (e.g. setup.py 1)")
+            return 1
         if choice in ("0", "q", "exit"):
             info("Bye.")
             return 0

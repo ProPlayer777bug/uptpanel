@@ -87,45 +87,47 @@ if [ ! -f setup.py ]; then
   fail "setup.py not found in repo; ensure it is committed to GitHub."
 fi
 
-# Unattended full panel install. No env vars are required — a plain
-# `curl ... | sudo bash` installs the panel over HTTP at this host's address.
-# setup.py never embeds or prints any secret except a freshly-generated admin
-# password shown once.
+# A plain `curl ... | sudo bash` opens the interactive DevOps menu (option 1
+# install panel, 2 node, 3/4 uninstall, 6 add admin, ... 12 configure domain/
+# HTTPS). setup.py reads keypresses from /dev/tty, so the menu works even though
+# stdin is the curl pipe. No credentials are ever embedded anywhere.
 #
 #   curl -sSL https://raw.githubusercontent.com/ProPlayer777bug/uptpanel/main/bootstrap.sh | sudo bash
 #
-# To also configure a public domain + HTTPS in the SAME run, set the public
-# facts as env vars (nothing secret — credentials are provided live at runtime
-# by the operator, never hardcoded):
+# To install fully headless in one shot (no interactive menu), opt in explicitly:
+#
+#   curl -sSL https://raw.githubusercontent.com/ProPlayer777bug/uptpanel/main/bootstrap.sh \
+#     | sudo UH_OPT=1 bash
+#
+# Or install + expose on a domain with HTTPS in the same run:
 #
 #   curl -sSL https://raw.githubusercontent.com/ProPlayer777bug/uptpanel/main/bootstrap.sh \
 #     | sudo UH_PANEL_MODE=https UH_PANEL_DOMAIN=panel.example.com UH_ADMIN_AUTO=auto \
 #           UH_OPEN_FIREWALL=yes bash
 #
-# If you install without a domain, enable it afterwards from the running panel
-# machine by running `python3 setup.py` and picking option 12 (Configure domain / HTTPS).
-#
 # Optional vars (all non-secret):
-#   UH_PANEL_MODE   http|https   (default: http when no domain is provided)
-#   UH_PANEL_DOMAIN              the panel domain (triggers DNS + Let's Encrypt)
-#   UH_PUBLIC_IP                 force the public IPv4 (else auto-detected)
-#   UH_CF_TOKEN / UH_CF_ZONE_ID  auto-create the A record via Cloudflare DNS
-#   UH_CF_PROXIED                true/false for the Cloudflare proxy
-#   UH_OPEN_FIREWALL             yes to open 80/443/API/node-agent ports
-#   UH_ADMIN_AUTO=auto           generate a random admin password (recommended)
-#   UH_ADMIN_PASSWORD            set the admin password explicitly
-#   UH_ADMIN_EMAIL               admin login email
-#   UH_UFW_ENABLE                yes to also run `ufw enable`
-#   UH_OPT=1                     run the numbered setup.py option (default 1)
+#   UH_OPT=<n>                  run a numbered setup.py option headless (default shows menu)
+#   UH_PANEL_MODE   http|https  provoke unattended install (default: interactive menu)
+#   UH_PANEL_DOMAIN             the panel domain (triggers DNS + Let's Encrypt)
+#   UH_PUBLIC_IP                force the public IPv4 (else auto-detected)
+#   UH_CF_TOKEN / UH_CF_ZONE_ID auto-create the A record via Cloudflare DNS
+#   UH_CF_PROXIED               true/false for the Cloudflare proxy
+#   UH_OPEN_FIREWALL            yes to open 80/443/API/node-agent ports
+#   UH_ADMIN_AUTO=auto          generate a random admin password (recommended)
+#   UH_ADMIN_PASSWORD           set the admin password explicitly
+#   UH_ADMIN_EMAIL              admin login email
+#   UH_UFW_ENABLE               yes to also run `ufw enable`
 if [ "${UH_OPT:-}" = "menu" ]; then
+  UH_OPT=""
   python3 setup.py "$@"
 elif [ -n "${UH_OPT:-}" ]; then
   python3 setup.py "${UH_OPT}" "$@"
-elif [ -n "${UH_PANEL_MODE:-}" ] || ! [ -t 0 ]; then
+elif [ -n "${UH_PANEL_MODE:-}" ] || [ -n "${UH_ADMIN_AUTO:-}" ] || [ -n "${UH_ADMIN_PASSWORD:-}" ]; then
   say "Unattended mode — running full panel install."
   # Pass the option as a positional argument (robust, no env-propagation quirk);
   # other UH_* vars still flow through the environment for setup.py to read.
   python3 setup.py 1 "$@"
 else
+  say "Opening the setup menu (interactive) — pick a numbered option."
   python3 setup.py "$@"
 fi

@@ -511,12 +511,16 @@ app.get('/api/users/:id/servers', async (req, reply) => {
 })
 
 app.post('/api/auth/logout', async (req, reply) => {
-  const token = req.headers.authorization?.replace(/^Bearer\s+/i, '')
-  if (token) {
-    store.db.sessions = store.db.sessions.filter((s) => s.token !== token)
-    store.persist()
+  try {
+    const token = req.headers.authorization?.replace(/^Bearer\s+/i, '')
+    if (token) {
+      store.db.sessions = store.db.sessions.filter((s) => s.token !== token)
+      store.persist()
+    }
+    return { ok: true }
+  } catch (e) {
+    return reply.code(500).send({ ok: false, error: 'logout failed' })
   }
-  return { ok: true }
 })
 
 function me(req: any) {
