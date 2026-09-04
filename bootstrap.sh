@@ -108,7 +108,7 @@ fi
 #   UH_ADMIN_EMAIL               admin login email
 #   UH_UFW_ENABLE                yes to also run `ufw enable`
 if [ -n "${UH_PANEL_MODE:-}" ] && [ -z "${UH_OPT:-}" ]; then
-  UH_OPT=1
+  export UH_OPT=1
   say "Unattended mode — running full panel install (UH_OPT=1)."
 fi
 
