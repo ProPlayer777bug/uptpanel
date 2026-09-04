@@ -20,6 +20,7 @@ const Templates = lazy(() => import('./pages/Templates').then((m) => ({ default:
 const Users = lazy(() => import('./pages/Users').then((m) => ({ default: m.Users })))
 const Databases = lazy(() => import('./pages/Databases').then((m) => ({ default: m.Databases })))
 const AuthProviders = lazy(() => import('./pages/AuthProviders').then((m) => ({ default: m.AuthProviders })))
+const Themes = lazy(() => import('./pages/Themes').then((m) => ({ default: m.Themes })))
 
 function Splash() {
   return (
@@ -75,6 +76,7 @@ export default function App() {
         <Route path="/auth-providers" element={<Page><AdminRoute><AuthProviders /></AdminRoute></Page>} />
         <Route path="/account" element={<Page><Account /></Page>} />
         <Route path="/account/api-keys" element={<Page><Account focus="api-keys" /></Page>} />
+        <Route path="/themes" element={<Page><Themes /></Page>} />
         <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>
       <ToastHost />

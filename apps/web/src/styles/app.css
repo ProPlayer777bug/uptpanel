@@ -1449,3 +1449,36 @@ textarea.input { resize: vertical; min-height: 80px; }
 }
 .sw-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .sw-check { color: var(--accent-strong); font-weight: 800; }
+
+/* ============================================================
+   Themes page — card grid
+   ============================================================ */
+.themes-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+  gap: 12px;
+}
+.theme-card {
+  position: relative; display: flex; flex-direction: column;
+  border-radius: var(--r-lg); overflow: hidden;
+  border: 2px solid var(--line); background: var(--surface-2);
+  cursor: pointer; transition: all var(--speed) var(--ease);
+  text-align: left; padding: 0;
+}
+.theme-card:hover { border-color: var(--accent-line); transform: translateY(-2px); box-shadow: var(--shadow); }
+.theme-card.active { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent-line), var(--shadow-lg); }
+.tc-preview { display: flex; flex-direction: column; }
+.tc-bar { height: 4px; }
+.tc-body { padding: 12px; display: flex; flex-direction: column; gap: 6px; min-height: 80px; }
+.tc-surface { display: flex; flex-direction: column; gap: 6px; padding: 8px; border-radius: var(--r-sm); }
+.tc-card { display: flex; flex-direction: column; gap: 3px; padding: 6px 8px; border-radius: var(--r-sm); }
+.tc-card2 { flex-direction: row; align-items: center; gap: 6px; }
+.tc-dot { width: 6px; height: 6px; border-radius: 50%; flex-shrink: 0; }
+.tc-name {
+  padding: 8px 12px; font-size: 12px; font-weight: 700; color: var(--text);
+  border-top: 1px solid var(--line); background: var(--surface);
+}
+.tc-active-dot {
+  position: absolute; top: 8px; right: 8px; width: 10px; height: 10px;
+  border-radius: 50%; border: 2px solid var(--bg); box-shadow: 0 1px 3px rgba(0,0,0,0.5);
+}
