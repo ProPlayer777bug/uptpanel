@@ -130,6 +130,7 @@ export function PluginManager({ server, open, onClose }: { server: Server; open:
     const list = catalog?.plugins || []
     const q = query.trim().toLowerCase()
     return list.filter((p) => {
+      if (p.kind === 'mod') return false
       if (source !== 'all' && p.source !== source) return false
       if (!q) return true
       return p.name.toLowerCase().includes(q) || (p.author || '').toLowerCase().includes(q) || p.description.toLowerCase().includes(q)
@@ -173,7 +174,6 @@ export function PluginManager({ server, open, onClose }: { server: Server; open:
                 <div className="cell-main" style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
                   {p.name}
                   <span className={`badge xs ${p.source === 'spigot' ? 'amber' : 'cyan'}`}>{p.source}</span>
-                  {p.kind === 'mod' && <span className="badge gray xs">mod</span>}
                 </div>
                 <div className="cell-sub xs" style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                   {p.description || '—'} · {p.author ? `${p.author} · ` : ''}{fmt(p.downloads)} downloads

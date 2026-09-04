@@ -233,9 +233,11 @@ async function fetchSpigotPlugins(limit = 40): Promise<PluginInfo[]> {
 async function fetchModrinthPlugins(limit = 40): Promise<PluginInfo[]> {
   const out: PluginInfo[] = []
   try {
-    // Bukkit (Paper) plugins on Modrinth, sorted by downloads.
+    // Bukkit (Paper/Spigot/Folia) plugins on Modrinth, sorted by downloads.
+    // Mods (Fabric/Forge/NeoForge) are excluded — the panel's Minecraft
+    // blueprint is a plugin (Paper) server, not a modded server.
     const params = new URLSearchParams({
-      facets: JSON.stringify([['project_type:mod', 'project_type:plugin']]),
+      facets: JSON.stringify([['project_type:plugin']]),
       index: 'downloads',
       limit: String(limit),
     })
@@ -243,10 +245,9 @@ async function fetchModrinthPlugins(limit = 40): Promise<PluginInfo[]> {
     const hits: any[] = Array.isArray(resp) ? resp : resp?.hits || []
     for (const r of hits.slice(0, limit)) {
       const slug = r?.slug
-      // Only include Paper/Bukkit & Fabric/Forge plugin/mod jars.
+      // Only include Paper/Bukkit/Spigot/Folia plugin loaders; skip mods.
       const loaders: string[] = r?.loaders || []
-      const isPlugin = loaders.includes('paper') || loaders.includes('bukkit') || loaders.includes('spigot')
-      const isMod = loaders.includes('fabric') || loaders.includes('forge') || loaders.includes('neoforge')
+      if (!loaders.some((l) => ['paper', 'bukkit', 'spigot', 'folia', 'purpur'].includes(l))) continue
       let info: any = null
       if (slug) {
         try { info = await fetchJson(`https://api.modrinth.com/v2/project/${slug}`) } catch { /* ignore */ }
@@ -259,13 +260,13 @@ async function fetchModrinthPlugins(limit = 40): Promise<PluginInfo[]> {
         name: r?.title || slug,
         description: r?.description || '',
         source: 'modrinth',
-        author: (info?.team || r?.author) ? null : null,
+        author: null,
         downloads: Number(r?.downloads || 0),
         icon: r?.icon_url || null,
-        url: `https://modrinth.com/${(r as any).project_type || 'plugin'}/${slug}`,
+        url: `https://modrinth.com/plugin/${slug}`,
         latestVersion: info?.version_type || null,
         downloadUrl: null, // resolved at install time from latest file
-        kind: isMod ? 'mod' : 'plugin',
+        kind: 'plugin',
       })
     }
   } catch (e: any) {
