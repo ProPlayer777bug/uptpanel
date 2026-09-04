@@ -55,7 +55,11 @@ Script-generation overrides (prefix each template env var with UH_SCRIPT_):
     and UH_SCRIPT_TEMPLATE=node-agent|panel-https|backup-data
 
 Public install (option [1] automates public exposure):
-    UH_PANEL_MODE     http|https      access mode (defaults to https)
+    No env vars are required. A plain `curl ... | sudo bash` installs the panel
+    over HTTP at the host's address; set the optional vars below to also expose
+    it publicly on a domain with HTTPS in the same run. To add a domain + HTTPS
+    later, pick option [12] "Configure domain / HTTPS" after installing.
+    UH_PANEL_MODE     http|https      access mode (defaults to http, no domain)
     UH_PANEL_DOMAIN   panel.example.com   the panel domain (also UH_PANEL_FQDN)
     UH_PUBLIC_IP      force the host's public IPv4 (auto-detected if omitted)
     UH_CF_TOKEN / UH_CF_ZONE_ID  auto-create the DNS A record via Cloudflare
@@ -67,8 +71,12 @@ Public install (option [1] automates public exposure):
     UH_ADMIN_EMAIL      admin login email (default admin@uptime.host)
 
 One-line install on a fresh VPS (no credentials in the command):
+    curl -sSL https://raw.githubusercontent.com/ProPlayer777bug/uptpanel/main/bootstrap.sh | sudo bash
+
+Same, but expose it on a domain with HTTPS in the same run:
     curl -sSL https://raw.githubusercontent.com/ProPlayer777bug/uptpanel/main/bootstrap.sh \\
-      | sudo UH_PANEL_MODE=https UH_PANEL_DOMAIN=panel.example.com UH_ADMIN_AUTO=auto bash
+      | sudo UH_PANEL_MODE=https UH_PANEL_DOMAIN=panel.example.com UH_ADMIN_AUTO=auto \\
+            UH_OPEN_FIREWALL=yes bash
 
 Security: the well-known seed admin password is rotated on every install and a
 fresh value is printed exactly once. No admin password is ever written to disk,
@@ -675,9 +683,10 @@ def install_panel():
     mode = os.environ.get("UH_PANEL_MODE", "").strip().lower()
     if not mode:
         if not sys.stdin.isatty():
-            die("set UH_PANEL_MODE=http|https to pick the panel access mode (stdin is not a TTY)", 2)
-        mode = input("Serve panel over http or https? [http/https]: ").strip().lower()
-    if mode not in ("http", "ip"):
+            mode = "http"  # no domain given via env on a non-TTY (piped) install
+        else:
+            mode = input("Serve panel over http or https? [http/https]: ").strip().lower()
+    if mode not in ("http", "ip", "https"):
         mode = "https"
 
     public_ip = detect_public_ip()
@@ -685,13 +694,15 @@ def install_panel():
         info(f"Detected public IPv4: {public_ip}")
 
     domain = os.environ.get("UH_PANEL_DOMAIN", "").strip() or os.environ.get("UH_PANEL_FQDN", "").strip()
-    if not domain and sys.stdin.isatty():
+    if not domain and mode == "https" and sys.stdin.isatty():
         try:
             domain = input(f"Panel domain (e.g. gp1.uptimehost.in) [{public_ip or ''}]: ").strip()
         except (EOFError, KeyboardInterrupt):
             domain = ""
     if mode == "https" and not domain:
-        die("HTTPS mode requires a domain — set UH_PANEL_DOMAIN (or UH_PANEL_FQDN)")
+        warn("no domain provided — skipping HTTPS for now.")
+        warn("you can enable a domain + HTTPS later by running option [12] in setup.py")
+        mode = "ip"
 
     # ------------------------------------------------------------------
     # Phase 3 — make it reachable: DNS + firewall + HTTPS.
@@ -704,14 +715,14 @@ def install_panel():
             elif os.environ.get("UH_CF_TOKEN", ""):
                 warn("Cloudflare token set but the A record could not be created — add it manually.")
             elif sys.stdin.isatty():
-                card = input("Add an A record  @ -> {public_ip}  in your DNS panel now, then press Enter. (or type 'skip'): ")
+                card = input(f"Add an A record  @ -> {public_ip}  in your DNS panel now, then press Enter. (or type 'skip'): ")
                 if card.strip().lower() in ("skip", "s"):
                     warn("skipping DNS check — HTTPS may not resolve yet")
         setup_panel_https(domain)
 
     # Open the ports used by the public panel + node agents.
     want_fw = os.environ.get("UH_OPEN_FIREWALL", "").strip().lower()
-    if not want_fw and sys.stdin.isatty():
+    if not want_fw and sys.stdin.isatty() and mode != "ip":
         want_fw = input("Open ports 80/443, API and 7373 (node agents) in the firewall? [y/N]: ").strip().lower()
     if want_fw in ("1", "y", "yes", "true"):
         open_firewall([80, 443, int(API_PORT), 7373])
@@ -732,6 +743,56 @@ def install_panel():
         print(f"  Admin pass  : (kept your existing password — not changed)")
     if mode == "https" and domain:
         print(f"  Cert        : Let's Encrypt (auto-renews via certbot)")
+    else:
+        print(f"  Domain/HTTPS: not configured yet — run option [12] to add it")
+    print("=" * 62)
+    return True
+
+
+def ensure_domain_https():
+    """Option 12 — point a domain at this panel and enable HTTPS (worker keeps running).
+
+    Run whenever the operator is ready to expose the panel publicly: it wires up
+    DNS (auto via Cloudflare or manual), opens the firewall, and issues a
+    Let's Encrypt certificate through nginx. Re-runnable and idempotent.
+    """
+    public_ip = detect_public_ip()
+    if public_ip:
+        info(f"Detected public IPv4: {public_ip}")
+
+    domain = os.environ.get("UH_PANEL_DOMAIN", "").strip() or os.environ.get("UH_PANEL_FQDN", "").strip()
+    if not domain:
+        if not sys.stdin.isatty():
+            die("set UH_PANEL_DOMAIN (or UH_PANEL_FQDN) to configure the domain (stdin is not a TTY)", 2)
+        default = "panel.uptimehost.in"
+        domain = input(f"Panel domain (e.g. panel.uptimehost.in) [{default}]: ").strip() or default
+        domain = domain.strip().rstrip(".")
+
+    if public_ip and not _dns_has_ip(domain, public_ip):
+        info(f"DNS for {domain} does not yet point to this host ({public_ip}).")
+        if cf_set_dns(domain, public_ip):
+            info("Created/updated the A record via Cloudflare automatically.")
+        elif os.environ.get("UH_CF_TOKEN", ""):
+            warn("Cloudflare token set but the A record could not be created — add it manually.")
+        else:
+            if not sys.stdin.isatty():
+                die("add an A record  @ -> %s  manually, then re-run option 12" % public_ip, 2)
+            card = input(f"Add an A record  @ -> {public_ip}  in your DNS panel now, then press Enter. (or 'skip'): ")
+            if card.strip().lower() in ("skip", "s"):
+                warn("skipping DNS check — HTTPS may not resolve yet")
+
+    setup_panel_https(domain)
+
+    want_fw = os.environ.get("UH_OPEN_FIREWALL", "").strip().lower()
+    if not want_fw and sys.stdin.isatty():
+        want_fw = input("Open ports 80/443, API and 7373 (node agents) in the firewall? [y/N]: ").strip().lower()
+    if want_fw in ("1", "y", "yes", "true"):
+        open_firewall([80, 443, int(API_PORT), 7373])
+
+    print()
+    print("=" * 62)
+    print(f"  HTTPS ready  : https://{domain}")
+    print("  (A record + Let's Encrypt cert configured; re-run to renew/change)")
     print("=" * 62)
     return True
 
@@ -1394,6 +1455,7 @@ MENU = [
     ("Configure GitHub OAuth", configure_github),
     ("Configure all auth (SMTP+Google+GitHub)", configure_auth_all),
     ("Generate & customize script", generate_scripts),
+    ("Configure domain / HTTPS", ensure_domain_https),
 ]
 
 
