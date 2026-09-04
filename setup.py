@@ -53,6 +53,26 @@ Auth-configuration overrides:
 Script-generation overrides (prefix each template env var with UH_SCRIPT_):
     e.g. UH_SCRIPT_PANEL_URL, UH_SCRIPT_AGENT_HOST, UH_SCRIPT_PANEL_EMAIL ...
     and UH_SCRIPT_TEMPLATE=node-agent|panel-https|backup-data
+
+Public install (option [1] automates public exposure):
+    UH_PANEL_MODE     http|https      access mode (defaults to https)
+    UH_PANEL_DOMAIN   panel.example.com   the panel domain (also UH_PANEL_FQDN)
+    UH_PUBLIC_IP      force the host's public IPv4 (auto-detected if omitted)
+    UH_CF_TOKEN / UH_CF_ZONE_ID  auto-create the DNS A record via Cloudflare
+    UH_CF_PROXIED     true/false for the Cloudflare proxy (default false)
+    UH_OPEN_FIREWALL  yes to open 80/443, the API port and the node-agent port
+    UH_UFW_ENABLE     yes to also run `ufw enable --force`
+    UH_ADMIN_AUTO=auto  generate a random, unique admin password (recommended)
+    UH_ADMIN_PASSWORD   set the admin password explicitly
+    UH_ADMIN_EMAIL      admin login email (default admin@uptime.host)
+
+One-line install on a fresh VPS (no credentials in the command):
+    curl -sSL https://raw.githubusercontent.com/ProPlayer777bug/uptpanel/main/bootstrap.sh \\
+      | sudo UH_PANEL_MODE=https UH_PANEL_DOMAIN=panel.example.com UH_ADMIN_AUTO=auto bash
+
+Security: the well-known seed admin password is rotated on every install and a
+fresh value is printed exactly once. No admin password is ever written to disk,
+embedded in the script, or included in the installer command.
 """
 
 import getpass
@@ -66,6 +86,7 @@ import tempfile
 import time
 import urllib.request
 import urllib.error
+import urllib.parse
 
 APP_NAME = "uptimehost"
 
@@ -406,13 +427,209 @@ def setup_panel_https(fqdn):
     info(f"Panel HTTPS ready at https://{fqdn}  (cert auto-renews via certbot)")
 
 
+# ---------------------------------------------------------------------------
+# Public accessibility for a fresh install.
+#
+# A freshly-installed panel is useless if it is only reachable on localhost,
+# and it is dangerous if left on the well-known seed credentials. These helpers
+# make a public deployment fully automatic AND secure by default:
+#
+#   * detect the host's public IPv4 (no creds needed),
+#   * verify / create a DNS A record for the panel domain,
+#   * open the firewall for web + API + node-agent traffic,
+#   * rotate the seed admin password to a fresh value so nothing is left as a
+#     hardcoded default (nothing secret is ever written to disk).
+#
+# No operator credential is ever embedded in setup.py or the one-line installer.
+# ---------------------------------------------------------------------------
+def detect_public_ip():
+    """Best-effort discover of this host's public IPv4 using only stdlib calls
+    through well-known IP echo endpoints. Returns '' if it cannot be found."""
+    env_ip = os.environ.get("UH_PUBLIC_IP", "").strip()
+    if env_ip:
+        return env_ip
+    for svc in (
+        "https://api.ipify.org",
+        "https://ifconfig.me/ip",
+        "https://icanhazip.com",
+        "https://checkip.amazonaws.com",
+    ):
+        try:
+            with urllib.request.urlopen(urllib.request.Request(svc), timeout=5) as r:
+                ip = (r.read().decode().strip() or "")
+            # crude IPv4 sanity check
+            import re
+            if ip and re.fullmatch(r"\d{1,3}(\.\d{1,3}){3}", ip):
+                return ip
+        except Exception:
+            continue
+    return ""
+
+
+def _dns_has_ip(domain, ip):
+    """Return True when <domain> already resolves (A) to <ip> on the public DNS."""
+    for cmd in (
+        lambda: sh(["getent", "ahostsv4", domain], capture=True),
+        lambda: sh(["dig", "+short", "A", domain], capture=True),
+        lambda: sh(["nslookup", "-type=A", domain], capture=True),
+    ):
+        try:
+            code, out = cmd()
+            if code == 0 and ip and ip in out:
+                return True
+        except Exception:
+            continue
+    return False
+
+
+def cf_set_dns(domain, ip):
+    """Create/update a Cloudflare A record for <domain> -> <ip> using the
+    Cloudflare v4 API (read token from UH_CF_TOKEN, zone from UH_CF_ZONE_ID)."""
+    token = os.environ.get("UH_CF_TOKEN", "").strip()
+    zone = os.environ.get("UH_CF_ZONE_ID", "").strip()
+    if not token or not zone:
+        return False
+    name = domain
+    proxied = os.environ.get("UH_CF_PROXIED", "false").strip().lower() in ("1", "true", "yes")
+    payload = {"type": "A", "name": name, "content": ip, "ttl": 120, "proxied": proxied}
+    code, res = http_json(f"https://api.cloudflare.com/client/v4/zones/{zone}/dns_records", payload,
+                          method="POST", extra_headers={"Authorization": "Bearer " + token})
+    if code in (200, 201) and res.get("success"):
+        return True
+    # Record may already exist — try to update it.
+    code2, res2 = http_json(
+        f"https://api.cloudflare.com/client/v4/zones/{zone}/dns_records?type=A&name={urllib.parse.quote(name)}",
+        token=token, method="GET",
+    )
+    if code2 == 200 and res2.get("success"):
+        for rec in res2.get("result", []) or []:
+            if rec.get("name") == name and rec.get("type") == "A":
+                rc, rr = http_json(
+                    f"https://api.cloudflare.com/client/v4/zones/{zone}/dns_records/{rec['id']}",
+                    {"type": "A", "name": name, "content": ip, "ttl": 120, "proxied": proxied},
+                    token=token, method="PUT",
+                )
+                return bool(rr.get("success")) if rc in (200, 201) else False
+    return False
+
+
+def open_firewall(ports):
+    """Open ports with ufw (or iptables fallback). Non-fatal on failure."""
+    if not ports:
+        return
+    if shutil.which("ufw"):
+        for p in sorted(set(str(x) for x in ports)):
+            sh(["sudo", "ufw", "allow", f"{p}/tcp"])
+        if os.environ.get("UH_UFW_ENABLE", "").strip().lower() in ("1", "yes", "true"):
+            sh(["sudo", "ufw", "enable", "--force"])
+    elif shutil.which("iptables"):
+        for p in sorted(set(str(x) for x in ports)):
+            sh(["sudo", "iptables", "-I", "INPUT", "-p", "tcp", "--dport", str(p), "-j", "ACCEPT"])
+    info(f"Opened firewall for ports: {', '.join(str(p) for p in ports)}")
+
+
+def _generate_strong_password(length=20):
+    import secrets
+    import string
+    alphabet = string.ascii_letters + string.digits + "!@#$%^&*-_=+."
+    return "".join(secrets.choice(alphabet) for _ in range(length))
+
+
+def rotate_default_admin(api_url, mode):
+    """Log into the fresh panel with the seed credentials and rotate the owner
+    admin password to a fresh secret.
+
+    Returns (email, new_password_or_None, already_configured):
+        email              the owner's (possibly updated) login email
+        new_password       the password that was actually applied, or None
+        already_configured True when the seed password no longer worked (i.e.
+                           this is a reinstall and the admin has already been
+                           rotated), in which case no new value was set.
+
+    The value is printed once and never written to disk.
+
+    mode: 'auto'  -> generate a random password  (recommended, default)
+          'env'   -> use UH_ADMIN_PASSWORD if set
+          ''      -> TTY prompt (interactive)
+    """
+    seed_email = "admin@uptime.host"
+    seed_pass = "admin123"
+    email = (os.environ.get("UH_ADMIN_EMAIL", "").strip() or seed_email)
+
+    # 1. Determine the desired password (auto / env / prompt).
+    new_pw = os.environ.get("UH_ADMIN_PASSWORD", "").strip()
+    if not new_pw and mode == "auto":
+        new_pw = _generate_strong_password()
+    if not new_pw and sys.stdin.isatty():
+        while True:
+            new_pw = getpass.getpass("Set a NEW admin password (min 6 chars): ")
+            if len(new_pw) >= 6:
+                break
+            warn("too short — need 6+ characters")
+
+    # 2. Log in with the seed account.
+    code, res = http_json(f"{api_url}/api/auth/login", {"email": seed_email, "password": seed_pass})
+    if code != 200 or not res.get("token"):
+        # The seed password no longer works — this is (almost always) a reinstall
+        # where the admin was already rotated. Do NOT invent/rotate a password.
+        warn("seed login failed — the admin password was already rotated; keeping it")
+        return email, None, True
+    token = res["token"]
+
+    # 3. Find the owner user and update its email + password.
+    if not new_pw and not email:
+        die("seed login worked but no new password was provided (set UH_ADMIN_PASSWORD or UH_ADMIN_AUTO=auto)", 2)
+    if not new_pw:
+        die("could not determine an admin password — set UH_ADMIN_PASSWORD, or use mode=auto (UH_ADMIN_AUTO=auto)", 2)
+
+    code2, list_res = http_json(f"{api_url}/api/users", token=token)
+    uid = None
+    if code2 == 200 and list_res.get("users"):
+        for u in list_res["users"]:
+            if u.get("email", "").lower() == seed_email:
+                uid = u.get("id")
+                break
+        if not uid and list_res["users"]:
+            uid = list_res["users"][0].get("id")
+    if not uid:
+        warn("could not locate the owner user to rotate its password")
+        return email, None, False
+
+    patch = {"password": new_pw}
+    # Only change the email if the operator asked for a different one (and it is
+    # a different address than the seed).
+    if email and email.lower() != seed_email:
+        patch["email"] = email
+    code3, _ = http_json(f"{api_url}/api/users/{uid}", patch, token=token, method="PATCH")
+    if code3 in (200, 201):
+        info("Seed admin credential rotated to a fresh secret.")
+    else:
+        warn(f"password rotation reported unexpected status {code3}")
+        return email, None, False
+    return email, new_pw, False
+
+
+def build_panel_url(mode, domain=None, ip=None):
+    """Return the human-facing URL (and its backend API URL) given the chosen
+    access mode, domain and public IP."""
+    if mode in ("http", "ip"):
+        host = domain or ip or ("localhost")
+        return f"http://{host}:{WEB_PORT}", API_URL
+    fqdn = domain
+    if not fqdn and ip:
+        fqdn = ip  # self-signed-ish fallback: plain IP over https won't verify
+    return f"https://{fqdn}", f"https://{fqdn}/api"
+
+
 def install_panel():
-    info("Installing panel...")
+    info("Installing panel (full provisioning + public exposure)...")
     install_requirements()
+
     # Build the web bundle
     code, out = sh(["npm", "--prefix", os.path.join(REPO_DIR, "apps", "web"), "run", "build"], cwd=REPO_DIR, capture=True)
     if code != 0:
         warn("web build reported a non-zero exit; continuing anyway:\n" + out[:400])
+
     # Locate tsx — npm workspaces hoist bins to the repo-root node_modules/.bin.
     tsx = os.path.join(REPO_DIR, "node_modules", ".bin", "tsx")
     if not os.path.exists(tsx):
@@ -420,6 +637,7 @@ def install_panel():
     if not os.path.exists(tsx):
         warn(f"tsx not found at {tsx}; is the API dependency installed?")
         return False
+
     # Start API
     start_daemon(
         "panel-api",
@@ -434,6 +652,7 @@ def install_panel():
         cwd=REPO_DIR,
         env={"UH_WEB_PORT": WEB_PORT},
     )
+
     if not wait_api(API_URL):
         warn("the API did not answer /api/health yet — tailing the log for clues:")
         tail_log("panel-api", lines=25)
@@ -442,23 +661,78 @@ def install_panel():
         warn("continuing anyway (API not confirmed up)")
     else:
         info("API is up and answering /api/health.")
+
+    # ------------------------------------------------------------------
+    # Phase 1 — never leave the well-known seed credentials in place.
+    # ------------------------------------------------------------------
+    auto_cred = os.environ.get("UH_ADMIN_AUTO", "").strip().lower() in ("1", "auto", "yes", "true")
+    cred_mode = "auto" if auto_cred else ("env" if os.environ.get("UH_ADMIN_PASSWORD", "").strip() else "prompt")
+    admin_email, applied_pw, already_configured = rotate_default_admin(API_URL, cred_mode)
+
+    # ------------------------------------------------------------------
+    # Phase 2 — gather public exposure facts up front.
+    # ------------------------------------------------------------------
     mode = os.environ.get("UH_PANEL_MODE", "").strip().lower()
     if not mode:
         if not sys.stdin.isatty():
             die("set UH_PANEL_MODE=http|https to pick the panel access mode (stdin is not a TTY)", 2)
         mode = input("Serve panel over http or https? [http/https]: ").strip().lower()
-    if mode in ("https", "ssl", "tls"):
-        fqdn = os.environ.get("UH_PANEL_FQDN", "").strip()
-        if not fqdn:
-            if not sys.stdin.isatty():
-                die("set UH_PANEL_FQDN to the panel domain (e.g. gp1.uptimehost.in) for HTTPS", 2)
-            fqdn = input("Panel FQDN (e.g. gp1.uptimehost.in; DNS must point to this host): ").strip()
-        if not fqdn:
-            die("panel FQDN is required for HTTPS")
-        setup_panel_https(fqdn)
-        info(f"Panel running. Open https://{fqdn} in a browser. API: {API_URL}")
-    else:
-        info(f"Panel started. Web: http://localhost:{WEB_PORT}  API: {API_URL}")
+    if mode not in ("http", "ip"):
+        mode = "https"
+
+    public_ip = detect_public_ip()
+    if public_ip:
+        info(f"Detected public IPv4: {public_ip}")
+
+    domain = os.environ.get("UH_PANEL_DOMAIN", "").strip() or os.environ.get("UH_PANEL_FQDN", "").strip()
+    if not domain and sys.stdin.isatty():
+        try:
+            domain = input(f"Panel domain (e.g. gp1.uptimehost.in) [{public_ip or ''}]: ").strip()
+        except (EOFError, KeyboardInterrupt):
+            domain = ""
+    if mode == "https" and not domain:
+        die("HTTPS mode requires a domain — set UH_PANEL_DOMAIN (or UH_PANEL_FQDN)")
+
+    # ------------------------------------------------------------------
+    # Phase 3 — make it reachable: DNS + firewall + HTTPS.
+    # ------------------------------------------------------------------
+    if mode == "https":
+        if public_ip and not _dns_has_ip(domain, public_ip):
+            info(f"DNS for {domain} does not yet point to this host ({public_ip}).")
+            if cf_set_dns(domain, public_ip):
+                info("Created/updated the A record via Cloudflare automatically.")
+            elif os.environ.get("UH_CF_TOKEN", ""):
+                warn("Cloudflare token set but the A record could not be created — add it manually.")
+            elif sys.stdin.isatty():
+                card = input("Add an A record  @ -> {public_ip}  in your DNS panel now, then press Enter. (or type 'skip'): ")
+                if card.strip().lower() in ("skip", "s"):
+                    warn("skipping DNS check — HTTPS may not resolve yet")
+        setup_panel_https(domain)
+
+    # Open the ports used by the public panel + node agents.
+    want_fw = os.environ.get("UH_OPEN_FIREWALL", "").strip().lower()
+    if not want_fw and sys.stdin.isatty():
+        want_fw = input("Open ports 80/443, API and 7373 (node agents) in the firewall? [y/N]: ").strip().lower()
+    if want_fw in ("1", "y", "yes", "true"):
+        open_firewall([80, 443, int(API_PORT), 7373])
+
+    # ------------------------------------------------------------------
+    # Phase 4 — report the public access point (once, not persisted).
+    # ------------------------------------------------------------------
+    panel_url, _api_back = build_panel_url(mode, domain=domain, ip=public_ip)
+    print()
+    print("=" * 62)
+    print("  PANEL INSTALLED — public access")
+    print("=" * 62)
+    print(f"  Panel URL   : {panel_url}")
+    print(f"  Admin email : {admin_email}")
+    if applied_pw:
+        print(f"  Admin pass  : {applied_pw}   <-- save this now, it is shown only once")
+    elif already_configured:
+        print(f"  Admin pass  : (kept your existing password — not changed)")
+    if mode == "https" and domain:
+        print(f"  Cert        : Let's Encrypt (auto-renews via certbot)")
+    print("=" * 62)
     return True
 
 
@@ -664,7 +938,7 @@ def wait_api(base, tries=30, delay=1.0, health="/api/health"):
     return False
 
 
-def http_json(url, payload=None, token=None, method=None):
+def http_json(url, payload=None, token=None, method=None, extra_headers=None):
     """Tiny stdlib JSON HTTP client."""
     data = json.dumps(payload).encode() if payload is not None else None
     method = method or ("POST" if payload is not None else "GET")
@@ -672,6 +946,8 @@ def http_json(url, payload=None, token=None, method=None):
     req.add_header("Content-Type", "application/json")
     if token:
         req.add_header("Authorization", "Bearer " + token)
+    for k, v in (extra_headers or {}).items():
+        req.add_header(k, v)
     try:
         with urllib.request.urlopen(req, timeout=20) as r:
             body = r.read().decode()

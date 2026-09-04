@@ -83,12 +83,33 @@ fi
 
 say "Running setup.py — pick an option (1 install panel, 2 install node, ...)"
 cd "$DIR"
-if [ -f setup.py ]; then
-  # Clear any stale UH_OPT from the parent shell so the interactive menu is
-  # always shown. For unattended installs set the option on the repo clone
-  # directly:  (cd "$DIR" && UH_OPT=1 python3 setup.py)
-  unset UH_OPT
-  python3 setup.py "$@"
-else
+if [ ! -f setup.py ]; then
   fail "setup.py not found in repo; ensure it is committed to GitHub."
 fi
+
+# Unattended full panel install — triggered by setting UH_PANEL_MODE (or an
+# explicit UH_OPT) in the environment. All "public exposure" facts are read by
+# setup.py from the same env vars forwarded below; setup.py never embeds or
+# prints any secret except a freshly-generated admin password shown once.
+#
+#   curl -sSL https://raw.githubusercontent.com/ProPlayer777bug/uptpanel/main/bootstrap.sh \
+#     | sudo UH_PANEL_MODE=https UH_PANEL_DOMAIN=panel.example.com UH_ADMIN_AUTO=auto \
+#           UH_OPEN_FIREWALL=yes bash
+#
+# Optional vars (all non-secret):
+#   UH_PANEL_MODE   http|https   (default: https when a domain is provided)
+#   UH_PANEL_DOMAIN              the panel domain (triggers DNS + Let's Encrypt)
+#   UH_PUBLIC_IP                 force the public IPv4 (else auto-detected)
+#   UH_CF_TOKEN / UH_CF_ZONE_ID  auto-create the A record via Cloudflare DNS
+#   UH_CF_PROXIED                true/false for the Cloudflare proxy
+#   UH_OPEN_FIREWALL             yes to open 80/443/API/node-agent ports
+#   UH_ADMIN_AUTO=auto           generate a random admin password (recommended)
+#   UH_ADMIN_PASSWORD            set the admin password explicitly
+#   UH_ADMIN_EMAIL               admin login email
+#   UH_UFW_ENABLE                yes to also run `ufw enable`
+if [ -n "${UH_PANEL_MODE:-}" ] && [ -z "${UH_OPT:-}" ]; then
+  UH_OPT=1
+  say "Unattended mode — running full panel install (UH_OPT=1)."
+fi
+
+python3 setup.py "$@"
