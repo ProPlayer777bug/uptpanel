@@ -56,6 +56,11 @@ export function DatabasesTab({ server }: { server: Server }) {
     catch (e: any) { toast.err(e?.message) }
     finally { setBusy(false) }
   }
+  const copyCreds = async (d: DB) => {
+    const s = `${d.type}://${d.username}:${d.password}@${d.host}:${d.port}/${d.name}`
+    try { await navigator.clipboard.writeText(s); toast.ok(`Copied connection string for ${d.name}`) }
+    catch { toast.err('Clipboard unavailable') }
+  }
 
   return (
     <div className="card">
@@ -85,6 +90,7 @@ export function DatabasesTab({ server }: { server: Server }) {
                   </td>
                   <td>
                     <div className="flex gap-1" style={{ justifyContent: 'flex-end' }}>
+                      <button className="btn sm ghost" onClick={() => copyCreds(d)} disabled={busy}><Icon name="copy" size={13} /></button>
                       <button className="btn sm ghost" onClick={() => rotate(d)} disabled={busy}><Icon name="restart" size={13} /> Rotate</button>
                       <button className="btn sm ghost" onClick={() => remove(d)}><Icon name="trash" size={13} /></button>
                     </div>

@@ -139,6 +139,10 @@ export interface Allocation {
   id: string
   port: number
   proto: string
+  /** Bind interface this port listens on (e.g. 0.0.0.0). */
+  ip?: string
+  /** Optional public hostname shown to clients instead of the raw IP. */
+  alias?: string
 }
 
 export interface Blueprint {
@@ -154,6 +158,12 @@ export interface Blueprint {
   recommendedMemoryMb: number
   recommendedStorageGb: number
   version: number
+  /** For Minecraft-catalog blueprints: whether versions track Mojang releases. */
+  mcCatalog?: boolean
+  /** Required Java major version for Minecraft-catalog blueprints. */
+  javaVersion?: number
+  /** Per-Java-runtime docker image mapping (Pterodactyl-style docker_images). */
+  dockerImages?: Record<number, string>
 }
 
 export interface Server {
@@ -176,6 +186,12 @@ export interface Server {
   startedAt: number | null
   lastAction?: string
   error?: string
+  /** Pinned Minecraft version (Minecraft-catalog servers only). */
+  mcVersion?: string
+  /** Pinned required Java major version (Minecraft-catalog servers only). */
+  javaVersion?: number
+  /** Extra environment derived from the server's pinned runtime. */
+  javaEnv?: Record<string, string>
   node?: { id: string; name: string; status: string; agentUrl: string } | null
   blueprint?: Blueprint | null
 }

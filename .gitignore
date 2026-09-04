@@ -33,3 +33,8 @@ Thumbs.db
 # Editor
 .vscode/
 .idea/
+
+# Internal scratch / planning notes (not part of the product)
+summary.txt
+update.md
+uiux-plan.md

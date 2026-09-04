@@ -29,6 +29,8 @@ export interface DBShape {
   schedules: any[]
   scheduleRuns: any[]
   databases: any[]
+  settings: Record<string, any>
+  otp: any[]
 }
 
 export function freshDb(): DBShape {
@@ -58,6 +60,8 @@ export function freshDb(): DBShape {
     schedules: [],
     scheduleRuns: [],
     databases: [],
+    settings: {},
+    otp: [],
   }
 }
 

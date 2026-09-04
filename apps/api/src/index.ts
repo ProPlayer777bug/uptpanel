@@ -13,8 +13,11 @@ import { seed } from './sim/seed.js'
 import { WsHub } from './ws/hub.js'
 import { randomBytes } from 'node:crypto'
 import { nanoid } from 'nanoid'
-import { requireAuth, createSession, verifyPw, hashPw, can, audit, isGlobalAdmin, serverAccess } from './modules/auth.js'
+import { requireAuth, createSession, verifyPw, hashPw, can, audit, isGlobalAdmin, serverAccess, generateKeyToken } from './modules/auth.js'
+import { issueOtp, verifyOtp, sendOtp, oauthAuthorizeUrl, oauthCallback, oauthCallbackUrl, appBaseUrl, providerFlags, getAuthSettings, setAuthSettings, publicAuthSettings } from './modules/providers.js'
 import { AgentClient, agentFor } from './modules/agentClient.js'
+import { sshProbe, sshInstall } from './modules/sshConnect.js'
+import { startMCVersionWatcher, currentDefaults, javaImage, mcState, refreshMCManifest } from './modules/mcVersions.js'
 import WebSocket from 'ws'
 
 const PORT = Number(process.env.UH_API_PORT || 8081)
@@ -29,7 +32,10 @@ const PAPER_21_11_JAR =
 // EULA during this process lifetime, so we only write eula=true once per boot.
 const autoEulaAccepted = new Set<string>()
 
-const app = Fastify({ logger: false })
+// Trust the reverse proxy (nginx) so X-Forwarded-Proto/Host are honored when
+// deriving the public base URL for OAuth redirects. UH_PANEL_URL also takes
+// precedence as a hard override.
+const app = Fastify({ logger: false, trustProxy: true })
 const store = new Store()
 seed(store)
 // Backfill: ensure capacity/maintenance/connectivity fields exist on nodes
@@ -46,6 +52,45 @@ for (const node of store.db.nodes) {
   if (!node.registrationToken) node.registrationToken = generateNodeToken()
   if (!node.installCommand) node.installCommand = buildInstallCommand(node)
 }
+
+// ---------------------------------------------------------------------------
+// Minecraft version-awareness migration. Upgrades persisted blueprints that
+// predate version tracking and snapshots a pinned version onto existing
+// Minecraft servers so they are never silently mutated later (a reinstall is
+// required to change a server's pinned version).
+// ---------------------------------------------------------------------------
+{
+  const knownJavaByImage: Record<string, number> = {
+    'ghcr.io/pterodactyl/yolks:java_25': 25,
+    'ghcr.io/pterodactyl/yolks:java_21': 21,
+    'ghcr.io/pterodactyl/yolks:java_17': 17,
+    'ghcr.io/pterodactyl/yolks:java_16': 16,
+    'ghcr.io/pterodactyl/yolks:java_11': 11,
+    'ghcr.io/pterodactyl/yolks:java_8': 8,
+    'itzg/minecraft-server:java21': 21,
+  }
+  const defaults = currentDefaults()
+  const defaultJava = defaults.defaultJava || 21
+  for (const bp of store.db.blueprints) {
+    if (bp.id === 'bp-minecraft' || bp.id === 'bp-paper') {
+      const java = bp.javaVersion = Number(bp.javaVersion) || knownJavaByImage[bp.image] || defaultJava
+      if (/itzg|java_21:|java_25:|java_17:/.test(bp.image)) bp.image = javaImage(java)
+      bp.startup = 'java -Xms128M -XX:MaxRAMPercentage=95.0 -jar server.jar nogui'
+      bp.mcCatalog = true
+      bp.dockerImages = { 8: javaImage(8), 11: javaImage(11), 16: javaImage(16), 17: javaImage(17), 21: javaImage(21), 25: javaImage(25) }
+      bp.environment = { EULA: 'TRUE' }
+    }
+  }
+  for (const s of store.db.servers) {
+    if ((s.blueprintId === 'bp-minecraft' || s.blueprintId === 'bp-paper') && s.mcVersion == null) {
+      const bp = store.db.blueprints.find((b: any) => b.id === s.blueprintId)
+      s.mcVersion = (defaults.release?.id as string) || '1.21.11'
+      s.javaVersion = Number(bp?.javaVersion) || knownJavaByImage[bp?.image] || defaultJava
+    }
+  }
+  store.persist()
+}
+
 const hub = new WsHub()
 
 await app.register(cors, { origin: true })
@@ -110,6 +155,207 @@ app.get('/api/auth/me', async (req) => {
 })
 
 // ---------------------------------------------------------------------------
+// Public-panel auth: email/phone OTP + Google/GitHub OAuth.
+// All methods are configured by an admin in the panel (Settings → Auth), and
+// are only offered on the login screen once a provider is configured.
+// ---------------------------------------------------------------------------
+
+// Which login methods are currently configured (for the login screen).
+app.get('/api/auth/methods', async () => {
+  const flags = providerFlags(store)
+  return { ok: true, ...flags }
+})
+
+// Email OTP: send a code to an inbox. Also used for a "magic link"-style login
+// where no separate password is needed. Target is a raw email address.
+app.post('/api/auth/otp/email/send', async (req, reply) => {
+  const { email } = (req.body || {}) as any
+  const norm = String(email || '').trim().toLowerCase()
+  if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(norm)) return reply.code(400).send({ ok: false, error: 'INVALID_EMAIL' })
+  const r = await sendOtp(store, norm, 'email')
+  if (!r.ok) return reply.code(r.error === 'EMAIL_OTP_NOT_CONFIGURED' ? 400 : 502).send({ ok: false, error: r.error })
+  return { ok: true, target: norm, expiresInSec: getAuthSettings(store).otpTtlSec || 300 }
+})
+
+// Phone OTP: send a code via SMS. Target is an E.164 phone number.
+app.post('/api/auth/otp/sms/send', async (req, reply) => {
+  const { phone } = (req.body || {}) as any
+  const norm = String(phone || '').trim()
+  if (!/^\+[1-9]\d{6,14}$/.test(norm)) return reply.code(400).send({ ok: false, error: 'INVALID_PHONE' })
+  const r = await sendOtp(store, norm, 'sms')
+  if (!r.ok) return reply.code(r.error === 'SMS_OTP_NOT_CONFIGURED' ? 400 : 502).send({ ok: false, error: r.error })
+  return { ok: true, target: norm, expiresInSec: getAuthSettings(store).otpTtlSec || 300 }
+})
+
+// OTP verify → login. The target (email or phone) is the account key. If no
+// account exists for it yet, one is auto-created (public signup) as a viewer.
+app.post('/api/auth/otp/verify', async (req, reply) => {
+  const { target, code, name } = (req.body || {}) as any
+  const t = String(target || '').trim().toLowerCase()
+  if (!t || !code) return reply.code(400).send({ ok: false, error: 'INVALID_REQUEST' })
+  if (!verifyOtp(store, t, code)) return reply.code(401).send({ ok: false, error: 'INVALID_OR_EXPIRED_CODE' })
+
+  let user = store.db.users.find((u) => u.email?.toLowerCase() === t || u.phone === t)
+  if (!user) {
+    const displayName = (name && String(name).trim()) || t.split('@')[0] || 'User'
+    user = {
+      id: 'u-' + nanoid(14),
+      email: t.includes('@') ? t : undefined,
+      phone: t.startsWith('+') ? t : undefined,
+      name: displayName,
+      role: 'viewer',
+      avatarHue: Math.floor(Math.random() * 360),
+      passwordHash: null,
+      createdAt: Date.now(),
+    }
+    store.db.users.push(user)
+    activity(user, 'auth', 'info', `${user.name} signed up via OTP`)
+  }
+  const token = createSession(store, user.id)
+  activity(user, 'auth', 'info', `${user.name} signed in via OTP`)
+  return { ok: true, token, user: publicUser(user) }
+})
+
+// OAuth start — return the provider's authorize URL (client should redirect).
+// The popup's redirect_uri is always an absolute callback on this API, derived
+// from the app base URL (UH_PANEL_URL), so it is never undefined.
+app.post('/api/auth/oauth/:provider/url', async (req, reply) => {
+  const { provider } = req.params as any
+  if (provider !== 'google' && provider !== 'github') return reply.code(400).send({ ok: false, error: 'UNKNOWN_PROVIDER' })
+  const flags = providerFlags(store)
+  if ((provider === 'google' && !flags.google) || (provider === 'github' && !flags.github)) {
+    return reply.code(400).send({ ok: false, error: 'OAUTH_NOT_CONFIGURED' })
+  }
+  const baseUrl = appBaseUrl(req)
+  return { ok: true, url: oauthAuthorizeUrl(provider, store, baseUrl), redirectUri: oauthCallbackUrl(provider, baseUrl) }
+})
+
+// OAuth callback — the browser is redirected here by the provider with ?code=.
+// We exchange the code server-side, create a session, and bounce the popup
+// back to the SPA, which delivers the token to the opener (Login) window.
+app.get('/api/auth/oauth/:provider', async (req, reply) => {
+  const { provider } = req.params as any
+  if (provider !== 'google' && provider !== 'github') return reply.code(400).send({ ok: false, error: 'UNKNOWN_PROVIDER' })
+  const q = (req.query || {}) as any
+  const baseUrl = appBaseUrl(req)
+  const err = q.error
+  if (err) {
+    return reply.redirect(`${baseUrl}/oauth/callback/${provider}?error=${encodeURIComponent(String(err))}`)
+  }
+  const code = String(q.code || '')
+  if (!code) {
+    return reply.redirect(`${baseUrl}/oauth/callback/${provider}?error=${encodeURIComponent('missing authorization code')}`)
+  }
+  let info: any
+  try {
+    info = await oauthCallback(store, provider, code, baseUrl)
+  } catch (e: any) {
+    return reply.redirect(`${baseUrl}/oauth/callback/${provider}?error=${encodeURIComponent(e?.message || 'OAUTH_FAILED')}`)
+  }
+  if (!info.email) {
+    return reply.redirect(`${baseUrl}/oauth/callback/${provider}?error=${encodeURIComponent('OAUTH_NO_EMAIL')}`)
+  }
+
+  // find-or-create the account bound to this provider + email
+  const byProvider = store.db.users.find((u) => u[`${provider}Id`])
+  const byEmail = store.db.users.find((u) => u.email?.toLowerCase() === info.email)
+  let user = byProvider || byEmail
+  if (!user) {
+    user = {
+      id: 'u-' + nanoid(14),
+      email: info.email,
+      name: info.name || info.email.split('@')[0],
+      role: 'viewer',
+      avatarHue: Math.floor(Math.random() * 360),
+      passwordHash: null,
+      [`${provider}Id`]: `${provider}:${info.email}`,
+      createdAt: Date.now(),
+    }
+    store.db.users.push(user)
+    activity(user, 'auth', 'info', `${user.name} signed up via ${provider}`)
+  }
+  if (!user[`${provider}Id`]) {
+    user[`${provider}Id`] = `${provider}:${info.email}`
+    if (info.avatar) user.avatar = info.avatar
+    store.persist()
+  }
+
+  const token = createSession(store, user.id)
+  activity(user, 'auth', 'info', `${user.name} signed in via ${provider}`)
+  const qs = new URLSearchParams({ token, name: user.name || '', email: info.email, role: user.role || 'viewer', avatarHue: String(user.avatarHue ?? '') })
+  return reply.redirect(`${baseUrl}/oauth/callback/${provider}?${qs.toString()}`)
+})
+
+// OAuth popup completion posted from a non-server flow (kept for compat): the
+// frontend exchanges the code and receives { token, user } directly.
+app.post('/api/auth/oauth/:provider/callback', async (req, reply) => {
+  const { provider } = req.params as any
+  if (provider !== 'google' && provider !== 'github') return reply.code(400).send({ ok: false, error: 'UNKNOWN_PROVIDER' })
+  const { code } = (req.body || {}) as any
+  if (!code) return reply.code(400).send({ ok: false, error: 'MISSING_CODE' })
+  let info: any
+  try {
+    info = await oauthCallback(store, provider, code, appBaseUrl(req))
+  } catch (e: any) {
+    return reply.code(400).send({ ok: false, error: e?.message || 'OAUTH_FAILED' })
+  }
+  if (!info.email) return reply.code(400).send({ ok: false, error: 'OAUTH_NO_EMAIL' })
+
+  const byEmail = store.db.users.find((u) => u.email?.toLowerCase() === info.email)
+  const byProvider = store.db.users.find((u) => u[`${provider}Id`])
+  let user = byProvider || byEmail
+  if (!user) {
+    user = {
+      id: 'u-' + nanoid(14),
+      email: info.email,
+      name: info.name || info.email.split('@')[0],
+      role: 'viewer',
+      avatarHue: Math.floor(Math.random() * 360),
+      passwordHash: null,
+      [`${provider}Id`]: `${provider}:${info.email}`,
+      createdAt: Date.now(),
+    }
+    store.db.users.push(user)
+    activity(user, 'auth', 'info', `${user.name} signed up via ${provider}`)
+  }
+  // persist linkage from then on
+  if (!user[`${provider}Id`]) {
+    user[`${provider}Id`] = `${provider}:${info.email}`
+    if (info.avatar) user.avatar = info.avatar
+    store.persist()
+  }
+
+  const token = createSession(store, user.id)
+  activity(user, 'auth', 'info', `${user.name} signed in via ${provider}`)
+  return { ok: true, token, user: publicUser(user) }
+})
+
+// Fetch the public "is it configured + masked secrets" state (admin) — used by
+// the Settings → Auth page.
+app.get('/api/admin/auth-providers', async (req, reply) => {
+  const user = me(req)
+  if (!user) return reply.code(401).send({ ok: false, error: 'UNAUTHENTICATED' })
+  if (!can(user, 'admin')) return reply.code(403).send({ ok: false, error: 'FORBIDDEN' })
+  return { ok: true, providers: publicAuthSettings(store), flags: providerFlags(store) }
+})
+
+// Save auth-provider credentials (admin). Empty strings clear a field.
+app.put('/api/admin/auth-providers', async (req, reply) => {
+  const user = me(req)
+  if (!user) return reply.code(401).send({ ok: false, error: 'UNAUTHENTICATED' })
+  if (!can(user, 'admin')) return reply.code(403).send({ ok: false, error: 'FORBIDDEN' })
+  const body = (req.body || {}) as any
+  const merged = setAuthSettings(store, {
+    smtp: body.smtp, sms: body.sms, google: body.google, github: body.github, otpTtlSec: body.otpTtlSec,
+  })
+  const saved = publicAuthSettings(store)
+  audit(store, user.name, 'UPDATE_AUTH_PROVIDERS', 'auth providers')
+  activity(user, 'admin', 'info', 'Updated auth provider configuration')
+  void merged
+  return { ok: true, providers: saved, flags: providerFlags(store) }
+})
+
+// ---------------------------------------------------------------------------
 // Users (admin only) — lets an operator add additional panel accounts, e.g.
 // via the CLI setup.py "add admin" step. Only global admins (owner+admin) may
 // create or list users.
@@ -157,8 +403,9 @@ app.post('/api/users', async (req, reply) => {
   return reply.code(201).send({ ok: true, user: publicUser(u) })
 })
 
-// Update an existing user's role (admin only) — used e.g. by setup.py or an
-// operator to promote someone to admin/owner.
+// Update an existing user (admin only): role (enable/promote admin), name,
+// email (unique) and password. An admin cannot demote or strip their own
+// admin rights, or promote anyone to owner unless they are themselves owner.
 app.patch('/api/users/:id', async (req, reply) => {
   const actor = me(req)
   if (!actor) return reply.code(401).send({ ok: false, error: 'UNAUTHENTICATED' })
@@ -166,17 +413,89 @@ app.patch('/api/users/:id', async (req, reply) => {
   const { id } = req.params as any
   const u = store.db.users.find((x) => x.id === id)
   if (!u) return reply.code(404).send({ ok: false, error: 'USER_NOT_FOUND' })
-  const { role, name } = (req.body || {}) as any
+  const { role, name, email, password } = (req.body || {}) as any
   const ROLES = ['viewer', 'developer', 'operator', 'admin', 'owner']
+  const isSelf = actor.id === id
+
   if (role !== undefined) {
     if (!ROLES.includes(role)) return reply.code(400).send({ ok: false, error: 'INVALID_ROLE' })
+    // Never allow stripping the last admin/owner (including yourself).
+    if (role !== 'admin' && role !== 'owner' && (u.role === 'admin' || u.role === 'owner')) {
+      return reply.code(400).send({ ok: false, error: 'CANNOT_DEMOTE_ADMIN' })
+    }
+    // Only the owner can create another owner.
+    if (role === 'owner' && actor.role !== 'owner') {
+      return reply.code(403).send({ ok: false, error: 'OWNER_ONLY' })
+    }
     u.role = role
   }
   if (name !== undefined && String(name).trim()) u.name = String(name).trim()
+
+  if (email !== undefined) {
+    const normEmail = String(email).trim().toLowerCase()
+    if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(normEmail)) {
+      return reply.code(400).send({ ok: false, error: 'INVALID_EMAIL' })
+    }
+    if (store.db.users.some((x: any) => x.id !== u.id && x.email.toLowerCase() === normEmail)) {
+      return reply.code(409).send({ ok: false, error: 'EMAIL_IN_USE' })
+    }
+    u.email = normEmail
+  }
+  if (password !== undefined && password !== '') {
+    if (String(password).length < 6) return reply.code(400).send({ ok: false, error: 'WEAK_PASSWORD' })
+    u.passwordHash = hashPw(password)
+  }
+
   store.persist()
   audit(store, actor.name, 'UPDATE_USER', `${u.email} role=${u.role}`)
   activity(actor, 'admin', 'info', `Updated user ${u.name} (role=${u.role})`, { userId: u.id })
   return { ok: true, user: publicUser(u) }
+})
+
+// Delete a user (admin only). You cannot delete yourself; deleting a user also
+// revokes their sessions and removes their per-server access grants.
+app.delete('/api/users/:id', async (req, reply) => {
+  const actor = me(req)
+  if (!actor) return reply.code(401).send({ ok: false, error: 'UNAUTHENTICATED' })
+  if (!can(actor, 'admin')) return reply.code(403).send({ ok: false, error: 'FORBIDDEN' })
+  const { id } = req.params as any
+  const u = store.db.users.find((x) => x.id === id)
+  if (!u) return reply.code(404).send({ ok: false, error: 'USER_NOT_FOUND' })
+  if (u.id === actor.id) return reply.code(400).send({ ok: false, error: 'CANNOT_DELETE_SELF' })
+  if (u.role === 'owner') return reply.code(400).send({ ok: false, error: 'CANNOT_DELETE_OWNER' })
+  const email = u.email
+  store.db.users = store.db.users.filter((x) => x.id !== id)
+  store.db.sessions = store.db.sessions.filter((s) => s.userId !== id)
+  store.db.access = store.db.access.filter((a) => a.email !== email)
+  store.persist()
+  audit(store, actor.name, 'DELETE_USER', email)
+  activity(actor, 'admin', 'info', `Deleted user ${u.name} (${email})`, { userId: id })
+  return { ok: true }
+})
+
+// List the servers a given user can access (admin only) — the per-user server
+// view used by the admin Users tab.
+app.get('/api/users/:id/servers', async (req, reply) => {
+  const actor = me(req)
+  if (!actor) return reply.code(401).send({ ok: false, error: 'UNAUTHENTICATED' })
+  if (!can(actor, 'admin')) return reply.code(403).send({ ok: false, error: 'FORBIDDEN' })
+  const { id } = req.params as any
+  const u = store.db.users.find((x) => x.id === id)
+  if (!u) return reply.code(404).send({ ok: false, error: 'USER_NOT_FOUND' })
+  const accessible = store.db.servers
+    .filter((s) => serverAccess(u, s, store).ok)
+    .map((s) => ({
+      id: s.id,
+      name: s.name,
+      state: s.state,
+      nodeId: s.nodeId,
+      blueprintId: s.blueprintId,
+      memoryLimitMb: s.memoryLimitMb,
+      storageGb: s.storageGb,
+      createdAt: s.createdAt,
+      ownerEmail: s.ownerEmail,
+    }))
+  return { ok: true, servers: accessible }
 })
 
 app.post('/api/auth/logout', async (req, reply) => {
@@ -190,6 +509,9 @@ app.post('/api/auth/logout', async (req, reply) => {
 
 function me(req: any) {
   return requireAuth(req, store)
+}
+function meFromToken(store: any, token: string) {
+  return requireAuth({ headers: { authorization: `Bearer ${token}` } } as any, store)
 }
 function publicUser(u: any) {
   const { passwordHash, ...rest } = u
@@ -249,7 +571,6 @@ function allocatePorts(node: any, count: number): { id: string; port: number; pr
   if (!node.portRangeStart || !node.portRangeEnd || node.portRangeEnd < node.portRangeStart) {
     return [] // no range configured
   }
-  // Collect all ports currently allocated on this node
   const used = new Set<number>()
   for (const s of store.db.servers) {
     if (s.nodeId === node.id) {
@@ -272,6 +593,21 @@ function allocatePorts(node: any, count: number): { id: string; port: number; pr
     out.push({ id: nanoid(8), port, proto: 'tcp' })
   }
   return out
+}
+
+// Draw allocations from the node's manually-defined pool (set in the
+// Allocations tab, each with an optional bind IP + public alias). Prefers free
+// pool entries and never auto-creates new ones. Returns null when the pool has
+// fewer free entries than requested so the caller can fall back.
+function allocateFromNodePool(node: any, count: number): { id: string; ip?: string; port: number; proto: string; alias?: string }[] | null {
+  const pool = node.allocations || []
+  const used = new Set<string>()
+  for (const s of store.db.servers) {
+    if (s.nodeId === node.id) for (const a of s.allocations || []) used.add(a.id)
+  }
+  const free = pool.filter((a: any) => !used.has(a.id))
+  if (free.length < count) return null
+  return free.slice(0, count).map((a: any) => ({ id: a.id, ip: a.ip, port: a.port, proto: a.proto || 'tcp', alias: a.alias }))
 }
 
 // ---------------------------------------------------------------------------
@@ -511,6 +847,95 @@ app.post('/api/nodes', async (req, reply) => {
   return reply.code(201).send({ ok: true, node: withHealth(node) })
 })
 
+// ---------------------------------------------------------------------------
+// AutoNodeConnect — provision + enroll a node entirely over SSH.
+//   POST /api/nodes/auto/probe    { host, username, password } -> host resources
+//   POST /api/nodes/auto/install  { host, username, password, name, memoryMb,
+//                                   diskGb, overcommit, ... }   -> creates node,
+//                                   installs + starts the agent over SSH, which
+//                                   registers back to the panel.
+// The SSH password is used transiently and never persisted.
+// ---------------------------------------------------------------------------
+app.post('/api/nodes/auto/probe', async (req, reply) => {
+  const user = me(req)
+  if (!user || !can(user, 'admin')) return reply.code(403).send({ ok: false, error: 'FORBIDDEN' })
+  const { host, port, username, password } = (req.body || {}) as any
+  if (!host || !username || !password) return reply.code(400).send({ ok: false, error: 'SSH_CREDS_REQUIRED' })
+  const creds = { host: String(host).trim(), port: Number(port || 22), username: String(username).trim(), password: String(password) }
+  try {
+    const info = await sshProbe(creds)
+    return { ok: true, host: creds.host, info }
+  } catch (e: any) {
+    return reply.code(502).send({ ok: false, error: 'SSH_PROBE_FAILED', detail: String(e?.message || e) })
+  }
+})
+
+app.post('/api/nodes/auto/install', async (req, reply) => {
+  const user = me(req)
+  if (!user || !can(user, 'admin')) return reply.code(403).send({ ok: false, error: 'FORBIDDEN' })
+  const { host, port, username, password, name, memoryMb, diskGb, overcommit, locationId } = (req.body || {}) as any
+  if (!host || !username || !password) return reply.code(400).send({ ok: false, error: 'SSH_CREDS_REQUIRED' })
+  const creds = { host: String(host).trim(), port: Number(port || 22), username: String(username).trim(), password: String(password) }
+  const panel = (process.env.UH_PANEL_URL || '').replace(/\/$/, '')
+  if (!panel) return reply.code(500).send({ ok: false, error: 'UH_PANEL_URL_NOT_SET' })
+
+  // Advertised host the panel should use to reach the agent = the IP the admin
+  // typed. The agent listens on plain HTTP; the panel already tolerates self-
+  // signed/https via UH_AGENT_INSECURE but http needs no special handling.
+  const node: any = {
+    id: nanoid(10),
+    name: (name && String(name).trim() ? String(name).trim() : String(host)).replace(/[^A-Za-z0-9 _.,-]/g, ''),
+    locationId: locationId || store.db.locations[0]?.id || null,
+    scheme: 'http',
+    host: creds.host,
+    port: 7373,
+    agentUrl: '',
+    agentToken: generateNodeToken(),
+    registrationToken: generateNodeToken(),
+    installCommand: '',
+    memoryMb: Number(memoryMb) || 8192,
+    diskGb: Number(diskGb) || 100,
+    cpuPercent: null,
+    overcommit: !!overcommit,
+    maintenance: false,
+    tokenCreatedAt: Date.now(),
+    status: 'offline',
+    dockerHealthy: false,
+    agentVersion: null,
+    createdAt: Date.now(),
+    health: null,
+  }
+  node.agentUrl = buildAgentUrl(node)
+  node.installCommand = buildInstallCommand(node)
+  // Persist the node BEFORE starting the agent so its register call finds it.
+  store.db.nodes.push(node)
+  store.persist()
+
+  try {
+    await sshInstall(creds, {
+      nodeId: node.id,
+      nodeName: node.name,
+      agentToken: node.agentToken,
+      regToken: node.registrationToken,
+      registerUrl: `${panel}/api/nodes/register`,
+      host: creds.host,
+      listenPort: node.port,
+      scheme: 'http',
+    })
+  } catch (e: any) {
+    store.db.nodes = store.db.nodes.filter((n) => n.id !== node.id)
+    store.persist()
+    audit(store, user.name, 'CREATE_NODE', `auto-install failed for ${node.name}: ${String(e?.message || e).slice(0, 300)}`)
+    return reply.code(502).send({ ok: false, error: 'SSH_INSTALL_FAILED', detail: String(e?.message || e) })
+  }
+
+  audit(store, user.name, 'CREATE_NODE', `node:${node.name} (auto via SSH ${creds.host})`)
+  activity(user, 'admin', 'info', `Auto-connected node ${node.name} via SSH`, { nodeId: node.id })
+  // Give the agent a beat to register, then report the live state.
+  await new Promise((r) => setTimeout(r, 3000))
+  return reply.code(201).send({ ok: true, node: withHealth(node) })
+})
+
 // Update node configuration (general settings, resources, server limits,
 // allocation strategy, Docker/images, dirs, SFTP, overcommit, etc.). Only the
 // provided fields are changed; everything else is left as-is.
@@ -623,9 +1048,13 @@ app.post('/api/nodes/:id/allocations', async (req, reply) => {
   const b = (req.body || {}) as any
   node.allocations = node.allocations || []
   const created: any[] = []
+  // Optional public hostname alias shared by every port in this range/batch,
+  // e.g. bind 0.0.0.0 + range 25565-25595 + alias play.test.in -> servers on
+  // these ports are advertised as play.test.in:<port>.
+  const alias = b.alias ? String(b.alias).trim() : undefined
   const addOne = (ip: string, port: number) => {
     if (node.allocations.some((a: any) => a.ip === ip && a.port === port)) return null
-    const alloc = { id: nanoid(10), ip, port, ...(node.allocations.length === 0 ? { primary: true, primaryId: true } : {}) }
+    const alloc = { id: nanoid(10), ip, port, ...(alias ? { alias } : {}), ...(node.allocations.length === 0 ? { primary: true, primaryId: true } : {}) }
     node.allocations.push(alloc)
     if (node.allocations.length === 1) node.primaryAllocationId = alloc.id
     return alloc
@@ -705,6 +1134,7 @@ app.delete('/api/nodes/:id', async (req, reply) => {
 app.post('/api/nodes/:id/refresh', async (req, reply) => {
   const user = me(req)
   if (!user) return reply.code(401).send({ ok: false, error: 'UNAUTHENTICATED' })
+  if (!isGlobalAdmin(user)) return reply.code(403).send({ ok: false, error: 'FORBIDDEN' })
   const { id } = req.params as any
   const node = store.db.nodes.find((n) => n.id === id)
   if (!node) return reply.code(404).send({ ok: false, error: 'NODE_NOT_FOUND' })
@@ -905,6 +1335,15 @@ app.get('/api/blueprints', async (req) => {
   return { ok: true, blueprints: store.db.blueprints }
 })
 
+// Auto-updating Minecraft version catalog. The panel polls Mojang's launcher
+// meta manifest so new releases appear here (and become defaults for new
+// servers) without operator action.
+app.get('/api/mc/versions', async (req) => {
+  const user = me(req)
+  if (!user) return { ok: false, error: 'UNAUTHENTICATED' }
+  return { ok: true, versions: currentDefaults(), meta: mcState() }
+})
+
 // ---------------------------------------------------------------------------
 // Servers — real Docker containers managed by the node agent
 // ---------------------------------------------------------------------------
@@ -979,6 +1418,18 @@ app.post('/api/servers', async (req, reply) => {
   }
 
   const id = 'srv-' + nanoid(12)
+  // Minecraft catalog blueprints snapshot the current latest release + its
+  // required Java runtime at creation, so each server is pinned to the version
+  // that was current when it was made. Existing/new servers never get their
+  // version silently bumped later; a manual reinstall is required to upgrade.
+  // If the Mojang manifest isn't loaded yet (fresh boot), fetch it inline so a
+  // brand-new server always pins the true latest release.
+  const defaults = isMinecraftCatalogBp(bp) && !currentDefaults().release
+    ? await refreshMCManifest()
+    : currentDefaults()
+  const mcDefaults = isMinecraftCatalogBp(bp)
+    ? { mcVersion: defaults.release?.id || null, javaVersion: defaults.release?.java ?? defaults.defaultJava }
+    : {}
   const server: any = {
     id,
     name: name || `${bp.name} Server`,
@@ -991,10 +1442,17 @@ app.post('/api/servers', async (req, reply) => {
     memoryLimitMb: memoryMb || bp.recommendedMemoryMb,
     storageGb: storageGb || bp.recommendedStorageGb,
     extraEnv: extraEnv || {},
-    // Allocate ports from node's range if configured, else use blueprint fixed ports
-    allocations: (node.portRangeStart && node.portRangeEnd)
-      ? allocatePorts(node, bp.ports.length)
-      : bp.ports.map((p: number) => ({ id: nanoid(8), port: p, proto: 'tcp' })),
+    ...mcDefaults,
+    // Allocate from the node's manual pool (Allocations tab) when it has
+    // enough free ports; otherwise fall back to the node's raw port range or
+    // blueprint fixed ports. The pool never auto-expands.
+    allocations: (() => {
+      const pool = allocateFromNodePool(node, bp.ports.length)
+      if (pool) return pool
+      return (node.portRangeStart && node.portRangeEnd)
+        ? allocatePorts(node, bp.ports.length)
+        : bp.ports.map((p: number) => ({ id: nanoid(8), port: p, proto: 'tcp' }))
+    })(),
     createdAt: Date.now(),
     installed: false,
     startedAt: null,
@@ -1014,19 +1472,40 @@ app.post('/api/servers', async (req, reply) => {
 // Build the container manifest forwarded to the node agent. Centralised so
 // provisioning, reinstall and self-healing start all recreate identical
 // containers from the server's stored blueprint/env/allocations.
+function isMinecraftCatalogBp(bp: any): boolean {
+  return !!bp && (bp.id === 'bp-minecraft' || bp.id === 'bp-paper' || bp.id === 'bp-vanilla-mc')
+}
+
+// resolveServerImage chooses the docker image for a server. Minecraft catalog
+// blueprints are version-aware: the image is picked from the required Java
+// runtime (snapshotted on the server at creation), so a server keeps its own
+// version even when the panel's global defaults advance. Non-Minecraft
+// blueprints keep their fixed blueprint image.
+function resolveServerImage(server: any, bp: any): string {
+  if (!isMinecraftCatalogBp(bp)) return bp?.image
+  const java = server.javaVersion != null ? Number(server.javaVersion) : null
+  if (java) return javaImage(java)
+  // Backward compatibility: pre-versioning servers carry no javaVersion; infer
+  // from the current blueprint image if it already encodes a Java runtime.
+  const m = /(?:java[_-]?|:java)(\d+)/i.exec(bp?.image || '')
+  if (m) return javaImage(Number(m[1]))
+  return bp?.image || javaImage(currentDefaults().defaultJava)
+}
+
 function buildManifest(server: any): any {
   const bp = store.db.blueprints.find((b: any) => b.id === server.blueprintId)
   return {
     id: server.id,
     name: server.name,
-    image: bp?.image,
+    image: resolveServerImage(server, bp),
     startup: bp?.startup ? (bp.startup as string).trim().split(/\s+/) : undefined,
-    env: { ...(bp?.environment || {}), ...(server.extraEnv || {}) },
+    env: { ...(bp?.environment || {}), ...(server.extraEnv || {}), ...(server.javaEnv || {}) },
     ports: Object.fromEntries((server.allocations || []).map((a: any) => [`${a.port}/tcp`, String(a.port)])),
     memoryMb: server.memoryLimitMb,
     cpuPercent: server.cpuPercent,
     diskMb: server.storageGb * 1024,
     mountData: '',
+    uid: server.uid ?? 1001,
   }
 }
 
@@ -1267,10 +1746,13 @@ app.post('/api/servers/:id/files/write', async (req, reply) => {
 // ---------------------------------------------------------------------------
 // Backups — real ZIP archives created/extracted by the node agent
 // ---------------------------------------------------------------------------
-app.get('/api/servers/:id/backups', async (req) => {
+app.get('/api/servers/:id/backups', async (req, reply) => {
   const user = me(req)
   if (!user) return { ok: false, error: 'UNAUTHENTICATED' }
   const { id } = req.params as any
+  const server = store.db.servers.find((s) => s.id === id)
+  if (!server) return reply.code(404).send({ ok: false, error: 'SERVER_NOT_FOUND' })
+  if (!serverAccess(user, server, store).ok) return reply.code(403).send({ ok: false, error: 'FORBIDDEN' })
   return { ok: true, backups: store.db.backups.filter((b) => b.serverId === id) }
 })
 
@@ -1347,6 +1829,7 @@ app.get('/api/servers/:id/backups/:bid/download', async (req, reply) => {
   const backup = store.db.backups.find((b) => b.id === bid && b.serverId === id)
   if (!backup) return reply.code(404).send({ ok: false, error: 'BACKUP_NOT_FOUND' })
   const server = store.db.servers.find((s) => s.id === id)!
+  if (!serverAccess(user, server, store).ok) return reply.code(403).send({ ok: false, error: 'FORBIDDEN' })
   const client = agentFor(store.db.nodes.find((n) => n.id === server.nodeId))
   if (!client) return reply.code(409).send({ ok: false, error: 'NODE_UNREACHABLE' })
   const up = await client.downloadBackup(server.id, backup.file)
@@ -1367,6 +1850,7 @@ app.post('/api/servers/:id/backups/:bid/restore', async (req, reply) => {
   const backup = store.db.backups.find((b) => b.id === bid && b.serverId === id)
   if (!backup) return reply.code(404).send({ ok: false, error: 'BACKUP_NOT_FOUND' })
   const server = store.db.servers.find((s) => s.id === id)!
+  if (!serverAccess(user, server, store).ok) return reply.code(403).send({ ok: false, error: 'FORBIDDEN' })
   const client = agentFor(store.db.nodes.find((n) => n.id === server.nodeId))
   if (!client) return reply.code(409).send({ ok: false, error: 'NODE_UNREACHABLE' })
   pushTerminal(id, `[restore] extracting ${backup.name} ...`, 'info')
@@ -1403,12 +1887,13 @@ app.delete('/api/servers/:id/backups/:bid', async (req, reply) => {
 // ---------------------------------------------------------------------------
 // Startup / configuration (env + startup command) forwarded to agent
 // ---------------------------------------------------------------------------
-app.get('/api/servers/:id/startup', async (req) => {
+app.get('/api/servers/:id/startup', async (req, reply) => {
   const user = me(req)
   if (!user) return { ok: false, error: 'UNAUTHENTICATED' }
   const { id } = req.params as any
   const server = store.db.servers.find((s) => s.id === id)
-  if (!server) return { ok: false, error: 'SERVER_NOT_FOUND' }
+  if (!server) return reply.code(404).send({ ok: false, error: 'SERVER_NOT_FOUND' })
+  if (!serverAccess(user, server, store).ok) return reply.code(403).send({ ok: false, error: 'FORBIDDEN' })
   const bp = store.db.blueprints.find((b) => b.id === server.blueprintId)
   return {
     ok: true,
@@ -1507,10 +1992,13 @@ app.post('/api/servers/:id/reinstall', async (req, reply) => {
 // ---------------------------------------------------------------------------
 // Schedules — cron-driven tasks executed by the control core
 // ---------------------------------------------------------------------------
-app.get('/api/servers/:id/schedules', async (req) => {
+app.get('/api/servers/:id/schedules', async (req, reply) => {
   const user = me(req)
   if (!user) return { ok: false, error: 'UNAUTHENTICATED' }
   const { id } = req.params as any
+  const server = store.db.servers.find((s) => s.id === id)
+  if (!server) return reply.code(404).send({ ok: false, error: 'SERVER_NOT_FOUND' })
+  if (!serverAccess(user, server, store).ok) return reply.code(403).send({ ok: false, error: 'FORBIDDEN' })
   const schedules = store.db.schedules
     .filter((s: any) => s.serverId === id)
     .map((s: any) => ({ ...s, runs: store.db.scheduleRuns.filter((r) => r.scheduleId === s.id).slice(0, 20) }))
@@ -1524,6 +2012,7 @@ app.post('/api/servers/:id/schedules', async (req, reply) => {
   const { id } = req.params as any
   const server = store.db.servers.find((s) => s.id === id)
   if (!server) return reply.code(404).send({ ok: false, error: 'SERVER_NOT_FOUND' })
+  if (!serverAccess(user, server, store).ok) return reply.code(403).send({ ok: false, error: 'FORBIDDEN' })
   const { name, cron, isActive = true, tasks = [] } = (req.body || {}) as any
   if (!cron || !cronValid(cron)) return reply.code(400).send({ ok: false, error: 'INVALID_CRON' })
   const schedule = {
@@ -1553,6 +2042,9 @@ app.post('/api/servers/:id/schedules/:sid', async (req, reply) => {
   if (!user) return reply.code(401).send({ ok: false, error: 'UNAUTHENTICATED' })
   if (!can(user, 'modify')) return reply.code(403).send({ ok: false, error: 'FORBIDDEN' })
   const { id, sid } = req.params as any
+  const server = store.db.servers.find((s) => s.id === id)
+  if (!server) return reply.code(404).send({ ok: false, error: 'SERVER_NOT_FOUND' })
+  if (!serverAccess(user, server, store).ok) return reply.code(403).send({ ok: false, error: 'FORBIDDEN' })
   const schedule = store.db.schedules.find((s: any) => s.id === sid && s.serverId === id)
   if (!schedule) return reply.code(404).send({ ok: false, error: 'SCHEDULE_NOT_FOUND' })
   const { name, cron, isActive, tasks } = (req.body || {}) as any
@@ -1576,6 +2068,9 @@ app.delete('/api/servers/:id/schedules/:sid', async (req, reply) => {
   if (!user) return reply.code(401).send({ ok: false, error: 'UNAUTHENTICATED' })
   if (!can(user, 'modify')) return reply.code(403).send({ ok: false, error: 'FORBIDDEN' })
   const { id, sid } = req.params as any
+  const server = store.db.servers.find((s) => s.id === id)
+  if (!server) return reply.code(404).send({ ok: false, error: 'SERVER_NOT_FOUND' })
+  if (!serverAccess(user, server, store).ok) return reply.code(403).send({ ok: false, error: 'FORBIDDEN' })
   store.db.schedules = store.db.schedules.filter((s: any) => !(s.id === sid && s.serverId === id))
   store.persist()
   return { ok: true }
@@ -1586,6 +2081,9 @@ app.post('/api/servers/:id/schedules/:sid/run', async (req, reply) => {
   if (!user) return reply.code(401).send({ ok: false, error: 'UNAUTHENTICATED' })
   if (!can(user, 'command')) return reply.code(403).send({ ok: false, error: 'FORBIDDEN' })
   const { id, sid } = req.params as any
+  const server = store.db.servers.find((s) => s.id === id)
+  if (!server) return reply.code(404).send({ ok: false, error: 'SERVER_NOT_FOUND' })
+  if (!serverAccess(user, server, store).ok) return reply.code(403).send({ ok: false, error: 'FORBIDDEN' })
   const schedule = store.db.schedules.find((s: any) => s.id === sid && s.serverId === id)
   if (!schedule) return reply.code(404).send({ ok: false, error: 'SCHEDULE_NOT_FOUND' })
   runSchedule(schedule, user)
@@ -1708,10 +2206,13 @@ setInterval(() => {
 // ---------------------------------------------------------------------------
 // Databases — connection metadata + lifecycle
 // ---------------------------------------------------------------------------
-app.get('/api/servers/:id/databases', async (req) => {
+app.get('/api/servers/:id/databases', async (req, reply) => {
   const user = me(req)
   if (!user) return { ok: false, error: 'UNAUTHENTICATED' }
   const { id } = req.params as any
+  const server = store.db.servers.find((s) => s.id === id)
+  if (!server) return reply.code(404).send({ ok: false, error: 'SERVER_NOT_FOUND' })
+  if (!serverAccess(user, server, store).ok) return reply.code(403).send({ ok: false, error: 'FORBIDDEN' })
   const list = store.db.databases.filter((d) => d.serverId === id).map(withDbHost)
   return { ok: true, databases: list }
 })
@@ -1768,6 +2269,19 @@ app.delete('/api/servers/:id/databases/:did', async (req, reply) => {
   return { ok: true }
 })
 
+// Global databases overview (admin only) — every database across all servers,
+// with the owning server name attached, so the admin "Databases" page works.
+app.get('/api/databases', async (req, reply) => {
+  const user = me(req)
+  if (!user) return reply.code(401).send({ ok: false, error: 'UNAUTHENTICATED' })
+  if (!can(user, 'admin')) return reply.code(403).send({ ok: false, error: 'FORBIDDEN' })
+  const list = store.db.databases.map((d) => {
+    const s = store.db.servers.find((x) => x.id === d.serverId)
+    return { ...withDbHost(d), serverName: s?.name || d.serverId }
+  })
+  return { ok: true, databases: list }
+})
+
 function dbHostFor(server: any): string {
   const node = store.db.nodes.find((n) => n.id === server.nodeId)
   if (node?.agentUrl) {
@@ -1797,10 +2311,13 @@ function fmtBytes(n: number): string {
 // ---------------------------------------------------------------------------
 // Snapshots (metadata; container snapshots are node-side in production)
 // ---------------------------------------------------------------------------
-app.get('/api/servers/:id/snapshots', async (req) => {
+app.get('/api/servers/:id/snapshots', async (req, reply) => {
   const user = me(req)
   if (!user) return { ok: false, error: 'UNAUTHENTICATED' }
   const { id } = req.params as any
+  const server = store.db.servers.find((s) => s.id === id)
+  if (!server) return reply.code(404).send({ ok: false, error: 'SERVER_NOT_FOUND' })
+  if (!serverAccess(user, server, store).ok) return reply.code(403).send({ ok: false, error: 'FORBIDDEN' })
   return { ok: true, snapshots: store.db.snapshots.filter((s) => s.serverId === id) }
 })
 
@@ -1809,6 +2326,9 @@ app.post('/api/servers/:id/snapshots', async (req, reply) => {
   if (!user) return reply.code(401).send({ ok: false, error: 'UNAUTHENTICATED' })
   if (!can(user, 'modify')) return reply.code(403).send({ ok: false, error: 'FORBIDDEN' })
   const { id } = req.params as any
+  const server = store.db.servers.find((s) => s.id === id)
+  if (!server) return reply.code(404).send({ ok: false, error: 'SERVER_NOT_FOUND' })
+  if (!serverAccess(user, server, store).ok) return reply.code(403).send({ ok: false, error: 'FORBIDDEN' })
   const { name } = (req.body || {}) as any
   const snap = { id: nanoid(10), serverId: id, name: name || 'Restore point', kind: 'manual' as const, sizeMb: Math.round(Math.random() * 400 + 60), createdAt: Date.now() }
   store.db.snapshots.push(snap)
@@ -1820,6 +2340,10 @@ app.post('/api/servers/:id/snapshots', async (req, reply) => {
 app.post('/api/servers/:id/snapshots/:sid/restore', async (req, reply) => {
   const user = me(req)
   if (!user) return reply.code(401).send({ ok: false, error: 'UNAUTHENTICATED' })
+  const { id } = req.params as any
+  const server = store.db.servers.find((s) => s.id === id)
+  if (!server) return reply.code(404).send({ ok: false, error: 'SERVER_NOT_FOUND' })
+  if (!serverAccess(user, server, store).ok) return reply.code(403).send({ ok: false, error: 'FORBIDDEN' })
   const { sid } = req.params as any
   const snap = store.db.snapshots.find((s) => s.id === sid)
   if (!snap) return reply.code(404).send({ ok: false, error: 'SNAPSHOT_NOT_FOUND' })
@@ -1830,6 +2354,10 @@ app.post('/api/servers/:id/snapshots/:sid/restore', async (req, reply) => {
 app.delete('/api/servers/:id/snapshots/:sid', async (req, reply) => {
   const user = me(req)
   if (!user) return reply.code(401).send({ ok: false, error: 'UNAUTHENTICATED' })
+  const { id } = req.params as any
+  const server = store.db.servers.find((s) => s.id === id)
+  if (!server) return reply.code(404).send({ ok: false, error: 'SERVER_NOT_FOUND' })
+  if (!serverAccess(user, server, store).ok) return reply.code(403).send({ ok: false, error: 'FORBIDDEN' })
   const { sid } = req.params as any
   store.db.snapshots = store.db.snapshots.filter((s) => s.id !== sid)
   store.persist()
@@ -1839,12 +2367,54 @@ app.delete('/api/servers/:id/snapshots/:sid', async (req, reply) => {
 // ---------------------------------------------------------------------------
 // Terminal history + broadcast
 // ---------------------------------------------------------------------------
-app.get('/api/servers/:id/terminal', async (req) => {
+app.get('/api/servers/:id/terminal', async (req, reply) => {
   const user = me(req)
   if (!user) return { ok: false, error: 'UNAUTHENTICATED' }
   const { id } = req.params as any
+  const server = store.db.servers.find((s) => s.id === id)
+  if (!server) return reply.code(404).send({ ok: false, error: 'SERVER_NOT_FOUND' })
+  if (!serverAccess(user, server, store).ok) return reply.code(403).send({ ok: false, error: 'FORBIDDEN' })
   return { ok: true, lines: store.db.terminal[id] || [] }
 })
+
+// resolveServerJar returns the authoritative server.jar download URL for a
+// Minecraft-catalog server's pinned version.
+//   - Vanilla (bp-minecraft): Mojang's signed server.jar from the version meta.
+//   - Paper (bp-paper): latest build for that version via the PaperMC API,
+//     falling back to the pinned 1.21.11 jar when resolution fails.
+async function resolveServerJar(server: any): Promise<string> {
+  const mc = server.mcVersion
+  if (server.blueprintId === 'bp-minecraft') {
+    if (mc) {
+      const info = mcState().infoByVersion?.[mc]
+      if (info?.serverJar) return info.serverJar
+      // Fallback: re-query Mojang manifest for this exact version.
+      try {
+        const manifest = await (await fetch('https://launchermeta.mojang.com/mc/game/version_manifest.json')).json()
+        const v = (manifest.versions || []).find((x: any) => x.id === mc)
+        if (v?.url) {
+          const meta = await (await fetch(v.url)).json()
+          if (meta?.downloads?.server?.url) return meta.downloads.server.url
+        }
+      } catch { /* fall through */ }
+    }
+    // Unknown/no version: fall back to the latest release's jar.
+    const cur = currentDefaults()
+    if (cur.release?.serverJar) return cur.release.serverJar
+  }
+  if (server.blueprintId === 'bp-paper' && mc) {
+    const safe = mc.replace(/[^0-9.]/g, '')
+    try {
+      const builds = await (await fetch(`https://api.papermc.io/v2/projects/paper/versions/${safe}/builds`, { headers: { accept: 'application/json' } })).json()
+      const list: any[] = Array.isArray(builds?.builds) ? builds.builds : []
+      if (list.length > 0) {
+        const last = list[list.length - 1]
+        return `https://api.papermc.io/v2/projects/paper/versions/${safe}/builds/${last.build}/downloads/${last.downloads?.application?.name}`
+      }
+    } catch { /* fall through */ }
+  }
+  return PAPER_21_11_JAR
+}
 
 async function seedServerFiles(server: any, client: AgentClient) {
   const defaults: Record<string, Record<string, string>> = {
@@ -1858,11 +2428,12 @@ async function seedServerFiles(server: any, client: AgentClient) {
   }
   const files = defaults[server.blueprintId] || {}
 
-  // Pterodactyl-style Paper: install a real server.jar from PaperMC, plus the
-  // EULA agreement and a server.properties bound to the server's first port.
-  if (server.blueprintId === 'bp-paper') {
+  // Minecraft catalog blueprints: install the real server.jar for the server's
+  // pinned version, plus the EULA agreement and a server.properties bound to
+  // the server's first port (Pterodactyl-style).
+  if (server.blueprintId === 'bp-minecraft' || server.blueprintId === 'bp-paper') {
     const port = (server.allocations && server.allocations[0]?.port) || 25565
-    try { await client.downloadFile(server.id, 'server.jar', PAPER_21_11_JAR) } catch { /* best-effort */ }
+    try { await client.downloadFile(server.id, 'server.jar', await resolveServerJar(server)) } catch { /* best-effort */ }
     files['eula.txt'] = 'eula=true\n'
     files['server.properties'] = [
       'server-port=' + port,
@@ -1892,12 +2463,18 @@ function pushTerminal(serverId: string, text: string, level: 'plain' | 'info' | 
 // ---------------------------------------------------------------------------
 // Access / permissions metadata
 // ---------------------------------------------------------------------------
-app.get('/api/servers/:id/access', async (req) => {
+app.get('/api/servers/:id/access', async (req, reply) => {
   const user = me(req)
   if (!user) return { ok: false, error: 'UNAUTHENTICATED' }
   const { id } = req.params as any
-  const s = store.db.servers.find((x) => x.id === id)
-  return { ok: true, owner: user, access: store.db.access.filter((a) => a.serverId === id) }
+  const server = store.db.servers.find((x) => x.id === id)
+  if (!server) return reply.code(404).send({ ok: false, error: 'SERVER_NOT_FOUND' })
+  const acc = serverAccess(user, server, store)
+  if (!acc.ok) return reply.code(403).send({ ok: false, error: 'FORBIDDEN' })
+  // The full list holds emails/permissions of every collaborator; expose it only
+  // to those who can manage access (global admins, owners, or 'access' delegants).
+  const canManage = isGlobalAdmin(user) || acc.permissions.access
+  return { ok: true, owner: user, access: canManage ? store.db.access.filter((a) => a.serverId === id) : [] }
 })
 
 app.post('/api/servers/:id/access', async (req, reply) => {
@@ -1920,6 +2497,125 @@ function defaultPerms(role: string): Record<string, boolean> {
   if (role === 'developer') return { view: true, command: true, files: true, snapshot: false, restore: false, access: false, admin: false }
   return { view: true, command: false, files: false, snapshot: false, restore: false, access: false, admin: false }
 }
+
+// ---------------------------------------------------------------------------
+// API keys
+// ---------------------------------------------------------------------------
+// List the API keys. A user lists their own keys; an admin lists all keys.
+function listApiKeys(user: any) {
+  const all = store.db.apiKeys
+  const mine = isGlobalAdmin(user) ? all : all.filter((k) => k.userId === user.id)
+  return mine.map((k) => {
+    const { token, ...rest } = k
+    return { ...rest, masked: token.slice(0, 6) + '…' + token.slice(-4) }
+  })
+}
+
+// Server-scoped API keys (each server its own key). Only the server owner or an
+// admin may manage these.
+app.get('/api/servers/:id/api-keys', async (req, reply) => {
+  const user = me(req)
+  if (!user) return reply.code(401).send({ ok: false, error: 'UNAUTHENTICATED' })
+  const { id } = req.params as any
+  const server = store.db.servers.find((x) => x.id === id)
+  if (!server) return reply.code(404).send({ ok: false, error: 'SERVER_NOT_FOUND' })
+  const acc = serverAccess(user, server, store)
+  if (!acc.ok || !(isGlobalAdmin(user) || acc.permissions.access)) {
+    return reply.code(403).send({ ok: false, error: 'FORBIDDEN' })
+  }
+  const keys = store.db.apiKeys.filter((k) => k.scope === 'server' && k.serverId === id)
+  return { ok: true, keys: keys.map((k) => ({ token: undefined, ...k, masked: k.token.slice(0, 6) + '…' + k.token.slice(-4) })) }
+})
+
+app.post('/api/servers/:id/api-keys', async (req, reply) => {
+  const user = me(req)
+  if (!user) return reply.code(401).send({ ok: false, error: 'UNAUTHENTICATED' })
+  const { id } = req.params as any
+  const server = store.db.servers.find((x) => x.id === id)
+  if (!server) return reply.code(404).send({ ok: false, error: 'SERVER_NOT_FOUND' })
+  const acc = serverAccess(user, server, store)
+  if (!acc.ok || !(isGlobalAdmin(user) || acc.permissions.access)) {
+    return reply.code(403).send({ ok: false, error: 'FORBIDDEN' })
+  }
+  const { label, command, files } = (req.body || {}) as any
+  const permissions = { view: true, command: command !== false, files: files === true }
+  const key = {
+    id: nanoid(12),
+    userId: user.key?.userId || user.id,
+    scope: 'server',
+    serverId: id,
+    token: generateKeyToken('server'),
+    label: String(label || `Server key`).slice(0, 80),
+    permissions,
+    createdAt: Date.now(),
+    lastUsedAt: 0,
+  }
+  store.db.apiKeys.push(key)
+  store.persist()
+  audit(store, user.name, 'ADD_API_KEY', `server:${id} ${key.label}`)
+  activity(user, 'admin', 'info', `Created API key "${key.label}" for ${server.name}`, { serverId: id })
+  return { ok: true, key: { ...key } }
+})
+
+app.delete('/api/servers/:id/api-keys/:kid', async (req, reply) => {
+  const user = me(req)
+  if (!user) return reply.code(401).send({ ok: false, error: 'UNAUTHENTICATED' })
+  const { id, kid } = req.params as any
+  const server = store.db.servers.find((x) => x.id === id)
+  if (!server) return reply.code(404).send({ ok: false, error: 'SERVER_NOT_FOUND' })
+  const acc = serverAccess(user, server, store)
+  if (!acc.ok || !(isGlobalAdmin(user) || acc.permissions.access)) {
+    return reply.code(403).send({ ok: false, error: 'FORBIDDEN' })
+  }
+  const idx = store.db.apiKeys.findIndex((k) => k.id === kid && k.scope === 'server' && k.serverId === id)
+  if (idx === -1) return reply.code(404).send({ ok: false, error: 'KEY_NOT_FOUND' })
+  const [removed] = store.db.apiKeys.splice(idx, 1)
+  store.persist()
+  audit(store, user.name, 'DELETE_API_KEY', `server:${id} ${removed.label}`)
+  return { ok: true }
+})
+
+// Account-level API keys. Owners/admins get a broad key to manage many/all
+// servers (e.g. for a Discord bot). Users can also create their own account key
+// scoped to the servers they can access.
+app.get('/api/account/api-keys', async (req, reply) => {
+  const user = me(req)
+  if (!user) return reply.code(401).send({ ok: false, error: 'UNAUTHENTICATED' })
+  return { ok: true, keys: listApiKeys(user).filter((k) => k.scope === 'account') }
+})
+
+app.post('/api/account/api-keys', async (req, reply) => {
+  const user = me(req)
+  if (!user) return reply.code(401).send({ ok: false, error: 'UNAUTHENTICATED' })
+  const { label } = (req.body || {}) as any
+  const key = {
+    id: nanoid(12),
+    userId: user.id,
+    scope: 'account',
+    serverId: null,
+    token: generateKeyToken('account'),
+    label: String(label || 'Account key').slice(0, 80),
+    permissions: { view: true, command: true, files: true, admin: true },
+    createdAt: Date.now(),
+    lastUsedAt: 0,
+  }
+  store.db.apiKeys.push(key)
+  store.persist()
+  audit(store, user.name, 'ADD_API_KEY', `account ${key.label}`)
+  return { ok: true, key }
+})
+
+app.delete('/api/account/api-keys/:kid', async (req, reply) => {
+  const user = me(req)
+  if (!user) return reply.code(401).send({ ok: false, error: 'UNAUTHENTICATED' })
+  const { kid } = req.params as any
+  const idx = store.db.apiKeys.findIndex((k) => k.id === kid && k.scope === 'account' && k.userId === user.id)
+  if (idx === -1) return reply.code(404).send({ ok: false, error: 'KEY_NOT_FOUND' })
+  const [removed] = store.db.apiKeys.splice(idx, 1)
+  store.persist()
+  audit(store, user.name, 'DELETE_API_KEY', `account ${removed.label}`)
+  return { ok: true }
+})
 
 // ---------------------------------------------------------------------------
 // Activity, notifications, health
@@ -1978,20 +2674,55 @@ app.register(async (app) => {
     socket.on('close', () => hub.remove(client))
   })
 
-  // Console proxy: browser -> panel (auth) -> node agent (docker).
+  // Console proxy: browser -> panel (auth) -> Wings daemon (docker).
+  // The daemon speaks the Wings websocket JSON protocol, which we transparently
+  // translate to/from the browser's lightweight {type,line} frames.
+
   app.get('/ws/server/:id/console', { websocket: true }, (socket, req) => {
-    const user = me(req)
+    // Browser WS handshakes cannot set an Authorization header, so accept the
+    // session token from the ?token= query param (same as the realtime /ws).
+    const queryToken = ((req as any).query && (req as any).query.token) as string | undefined
+    const user = queryToken ? meFromToken(store, queryToken) : me(req)
     if (!user) { socket.close(4001, 'unauthorized'); return }
     const { id } = req.params as any
     const server = store.db.servers.find((s) => s.id === id)
     if (!server) { socket.close(4004, 'not found'); return }
+    // The console streams live output and (via 'command'/'power' messages below)
+    // issues control actions. Require explicit access like every REST /power or
+    // /command: connect requires view, sending command/power requires 'command'.
+    const acc = serverAccess(user, server, store)
+    if (!acc.ok) { socket.close(4003, 'forbidden'); return }
     const node = store.db.nodes.find((n) => n.id === server.nodeId)
     if (!node?.agentUrl) { socket.close(4009, 'node unreachable'); return }
-    const wsUrl = node.agentUrl.replace(/^http/, 'ws').replace(/\/$/, '') + `/api/containers/${server.id}/ws`
+    const wsUrl = node.agentUrl.replace(/^http/, 'ws').replace(/\/$/, '') + `/api/servers/${server.id}/ws`
     const agent = new WebSocket(wsUrl, { headers: { authorization: `Bearer ${node.agentToken}` } })
-    agent.on('open', () => socket.send(JSON.stringify({ type: 'system', line: 'console attached' })))
+    agent.on('open', () => {
+      socket.send(JSON.stringify({ type: 'system', line: 'console attached' }))
+      agent.send(JSON.stringify({ event: 'auth', args: [] }))
+    })
     agent.on('message', (data) => {
-      socket.send(String(data))
+      let wingsMsg: any = null
+      try { wingsMsg = JSON.parse(String(data)) } catch { /* not json */ }
+      // Forward the daemon's Wings events to the browser as console lines.
+      if (wingsMsg && Array.isArray(wingsMsg.args)) {
+        const line = wingsMsg.args.join(' ') || ''
+        const ev = wingsMsg.event || ''
+        if (ev === 'console output') {
+          // Forward every line the daemon emits, unfiltered, so the console is
+          // a complete feed including boot/Unpacking/JVM startup output.
+          socket.send(JSON.stringify({ type: 'log', line }))
+        } else if (ev === 'status') {
+          socket.send(JSON.stringify({ type: 'status', line: `Server marked as ${line}` }))
+        } else if (ev === 'daemon error') {
+          socket.send(JSON.stringify({ type: 'status', line: `wings: ${line}` }))
+        } else if (ev === 'auth success') {
+          // authenticated with the daemon; nothing more to surface
+        } else if (ev === 'stats') {
+          // ignore; stats are polled via REST
+        }
+      } else {
+        socket.send(String(data))
+      }
       // Auto EULA acceptor: Minecraft refuses to start until eula.txt agrees.
       // When the console stream flags the EULA prompt we write eula=true into
       // the container's workdir (once per server) and restart it if stopped.
@@ -2020,7 +2751,25 @@ app.register(async (app) => {
     })
     agent.on('close', () => socket.send(JSON.stringify({ type: 'status', line: 'console detached' })))
     agent.on('error', () => socket.send(JSON.stringify({ type: 'status', line: 'console error' })))
-    socket.on('message', (raw: Buffer) => { if (agent.readyState === WebSocket.OPEN) agent.send(String(raw)) })
+    socket.on('message', (raw: Buffer) => {
+      if (agent.readyState !== WebSocket.OPEN) return
+      // Browser {type:'command', line} -> Wings {"event":"send command"}.
+      try {
+        const m = JSON.parse(String(raw))
+        if (m && typeof m.line === 'string') {
+          if (!acc.permissions.command) return
+          if (m.type === 'command') {
+            agent.send(JSON.stringify({ event: 'send command', args: [m.line] }))
+            return
+          }
+          if (m.type === 'power') {
+            agent.send(JSON.stringify({ event: 'set state', args: [m.line] }))
+            return
+          }
+        }
+      } catch { /* not json */ }
+      agent.send(String(raw))
+    })
     socket.on('close', () => { try { agent.close() } catch { /* noop */ } })
   })
 
@@ -2047,6 +2796,10 @@ app.listen({ port: PORT, host: '0.0.0.0' }).then((addr) => {
   console.log(`[UptimeHost] Control Core listening on ${addr}`)
   console.log(`[UptimeHost] REST API → http://localhost:${PORT}/api`)
   console.log(`[UptimeHost] WS → ws://localhost:${PORT}/ws`)
+  // Auto-updating Minecraft version defaults (Mojang launcher meta manifest).
+  // Refresh on boot and every 6h so new releases become the default for new
+  // servers without any manual intervention.
+  startMCVersionWatcher().catch((e) => console.error('[mc] version watcher failed', e))
 }).catch((err) => {
   console.error(err)
   process.exit(1)

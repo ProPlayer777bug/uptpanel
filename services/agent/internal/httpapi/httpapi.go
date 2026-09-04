@@ -46,9 +46,16 @@ func New(dm *docker.Client, token, nodeID, base string) *Server {
 var upgrader = websocket.Upgrader{CheckOrigin: func(r *http.Request) bool { return true }}
 
 func (s *Server) Routes() http.Handler {
+	// Wings-style daemon API: the Panel calls these by Bearer token to manage
+	// the server's container(s) on this node.
 	s.mux.HandleFunc("/api/system", s.withAuth(s.handleSystem))
 	s.mux.HandleFunc("/api/containers", s.withAuth(s.handleContainersRoot))
+	// Legacy container paths are kept as an alias so existing deployments keep
+	// working during the transition; the canonical paths are the /api/servers
+	// routes below.
 	s.mux.HandleFunc("/api/containers/", s.withAuth(s.handleContainers))
+	s.mux.HandleFunc("/api/servers", s.withAuth(s.handleContainersRoot))
+	s.mux.HandleFunc("/api/servers/", s.withAuth(s.handleServers))
 	s.mux.HandleFunc("/api/register", s.handleRegister)
 	return s.mux
 }
@@ -157,6 +164,16 @@ func (s *Server) handleContainersRoot(w http.ResponseWriter, r *http.Request) {
 			m.MountData = filepath.Join(s.base, m.ID)
 			_ = os.MkdirAll(m.MountData, 0o755)
 		}
+		// Ensure the container runtime user owns the data directory so the
+		// server can write its world/data (Wings-style chown). Defaults to the
+		// standard yolks container uid (1001) unless the panel specifies one.
+		if m.UID <= 0 {
+			m.UID = 1001
+		}
+		if err := os.Chown(m.MountData, int(m.UID), int(m.UID)); err != nil {
+			writeJSON(w, 500, map[string]any{"error": "chown data dir: " + err.Error()})
+			return
+		}
 		ctx, cancel := context.WithTimeout(r.Context(), 10*time.Minute)
 		defer cancel()
 		id, err := s.dm.CreateContainer(ctx, m)
@@ -178,9 +195,47 @@ func (s *Server) handleContainers(w http.ResponseWriter, r *http.Request) {
 	if len(parts) > 1 {
 		sub = parts[1]
 	}
+	s.handleServer(w, r, id, sub)
+}
+
+// handleServers is the canonical Wings-style server API:
+//
+//	/api/servers/:server                DELETE  -> remove container
+//	/api/servers/:server/power          POST    -> {action: start|stop|restart|kill, wait_seconds}
+//	/api/servers/:server/commands       POST    -> {commands: [...]}
+//	/api/servers/:server/logs           GET     -> ?tail=N
+//	/api/servers/:server/stats          GET
+//	/api/servers/:server/ws             (upgrade) Wings JSON console protocol
+//	/api/servers/:server/reinstall      POST
+//	/api/servers/:server/files/...      files API
+//	/api/servers/:server/backups/...    backups API
+func (s *Server) handleServers(w http.ResponseWriter, r *http.Request) {
+	rest := strings.TrimPrefix(r.URL.Path, "/api/servers/")
+	parts := strings.SplitN(rest, "/", 2)
+	id := parts[0]
+	sub := ""
+	if len(parts) > 1 {
+		sub = parts[1]
+	}
+	// Normalize Wings names to the shared internal endpoint names.
+	switch {
+	case sub == "commands":
+		sub = "command"
+	case strings.HasPrefix(sub, "files/"):
+		// keep as-is; handleServer split handles it
+	case strings.HasPrefix(sub, "backup/"):
+		sub = "backups/" + strings.TrimPrefix(sub, "backup/")
+	}
+	s.handleServer(w, r, id, sub)
+}
+
+// handleServer routes a server-scoped request to the right backend.
+// sub's first segment is the endpooint name; the remainder (if any) is passed
+// to the file/backup handlers which split their own sub-paths.
+func (s *Server) handleServer(w http.ResponseWriter, r *http.Request, id, sub string) {
 	ctx := r.Context()
 
-	// WebSocket console
+	// WebSocket console (Wings JSON protocol).
 	if sub == "ws" {
 		ws, err := upgrader.Upgrade(w, r, nil)
 		if err != nil {
@@ -199,9 +254,13 @@ func (s *Server) handleContainers(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 200, map[string]any{"removed": true})
 
 	case sub == "power" && r.Method == http.MethodPost:
-		var body map[string]string
+		var body map[string]any
 		_ = json.NewDecoder(r.Body).Decode(&body)
-		action := body["action"]
+		action, _ := body["action"].(string)
+		waitSec, _ := body["wait_seconds"].(int)
+		if waitSec <= 0 {
+			waitSec = 30
+		}
 		var err error
 		switch action {
 		case "start":
@@ -213,7 +272,7 @@ func (s *Server) handleContainers(w http.ResponseWriter, r *http.Request) {
 		case "kill":
 			err = s.dm.Kill(ctx, id)
 		default:
-			writeJSON(w, 400, map[string]any{"error": "unknown action " + action})
+			writeJSON(w, 422, map[string]any{"error": "power action must be one of stop/start/restart/kill"})
 			return
 		}
 		if err != nil {
@@ -221,6 +280,33 @@ func (s *Server) handleContainers(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		writeJSON(w, 200, map[string]any{"ok": true, "action": action})
+
+	case sub == "command" && r.Method == http.MethodPost:
+		// Accept both Wings plural {"commands":[...]} and legacy single.
+		var body struct {
+			Command  string   `json:"command"`
+			Commands []string `json:"commands"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		cmd := body.Command
+		if cmd == "" && len(body.Commands) > 0 {
+			cmd = body.Commands[0]
+		}
+		sent, serr := s.dm.SendCommand(ctx, id, cmd)
+		if sent && serr == nil {
+			writeJSON(w, 200, map[string]any{"ok": true})
+			return
+		}
+		if serr != nil {
+			writeJSON(w, 500, map[string]any{"error": serr.Error()})
+			return
+		}
+		out, err := s.dm.Exec(ctx, id, cmd)
+		if err != nil {
+			writeJSON(w, 500, map[string]any{"error": err.Error()})
+			return
+		}
+		writeJSON(w, 200, map[string]any{"ok": true, "output": out})
 
 	case sub == "stats" && r.Method == http.MethodGet:
 		st, err := s.dm.Stats(ctx, id)
@@ -230,18 +316,12 @@ func (s *Server) handleContainers(w http.ResponseWriter, r *http.Request) {
 		}
 		writeJSON(w, 200, st)
 
-	case sub == "command" && r.Method == http.MethodPost:
-		var body struct{ Command string `json:"command"` }
-		_ = json.NewDecoder(r.Body).Decode(&body)
-		out, err := s.dm.Exec(ctx, id, body.Command)
-		if err != nil {
-			writeJSON(w, 500, map[string]any{"error": err.Error()})
-			return
-		}
-		writeJSON(w, 200, map[string]any{"output": out})
-
 	case sub == "logs" && r.Method == http.MethodGet:
-		out, err := s.dm.Logs(ctx, id, 200)
+		tail := 200
+		if q := r.URL.Query().Get("tail"); q != "" {
+			fmt.Sscanf(q, "%d", &tail)
+		}
+		out, err := s.dm.Logs(ctx, id, tail)
 		if err != nil {
 			writeJSON(w, 500, map[string]any{"error": err.Error()})
 			return
@@ -255,8 +335,6 @@ func (s *Server) handleContainers(w http.ResponseWriter, r *http.Request) {
 		s.handleBackups(ctx, w, r, id, sub)
 
 	case sub == "reinstall" && r.Method == http.MethodPost:
-		// Rebuild the data directory to a pristine state: remove server
-		// files and recreate the mount, then re-create the container image.
 		hostRoot := filepath.Join(s.base, id)
 		if err := os.RemoveAll(hostRoot); err != nil {
 			writeJSON(w, 500, map[string]any{"error": err.Error()})
@@ -270,6 +348,9 @@ func (s *Server) handleContainers(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// handleServerParts routes a server-scoped request where the exact sub path is
+// already known (used by the legacy container routes which don't need
+// Wings-name normalization).
 // handleBackups manages on-node ZIP archives of a server's data directory.
 //   - POST /backups          {name}        -> create archive, returns meta
 //   - GET  /backups?name=X                 -> download archive bytes

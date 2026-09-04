@@ -25,3 +25,12 @@ export function useTheme() {
   }
   return { mode, applyMode }
 }
+
+// preferReducedMotion exposes a reactive flag so JS-driven animation can also
+// be disabled for users who ask for reduced motion (CSS handles transitions;
+// this covers imperative animation in components). Mirrors the media query in
+// styles/tokens.css.
+export function preferReducedMotion(): boolean {
+  if (typeof window === 'undefined' || !window.matchMedia) return false
+  return window.matchMedia('(prefers-reduced-motion: reduce)').matches
+}

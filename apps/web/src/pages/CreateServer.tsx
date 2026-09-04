@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { useBlueprints, useNodes } from '../api/hooks'
+import { useBlueprints, useNodes, usePoll } from '../api/hooks'
 import { api } from '../api/client'
 import { Icon, Modal, Spinner, toast } from '../components/ui'
 import { useApp } from '../state/auth'
@@ -20,6 +20,7 @@ export function CreateServer({ onClose }: { onClose: () => void }) {
   const { blueprints } = useBlueprints()
   const { refresh } = useApp()
   const navigate = useNavigate()
+  const { data: mc } = usePoll<any>(async () => api.get('/mc/versions'), [], 600000)
 
   const online = useMemo(() => nodes.filter((n) => n.status === 'online'), [nodes])
   const [bpId, setBpId] = useState('')
@@ -104,6 +105,11 @@ export function CreateServer({ onClose }: { onClose: () => void }) {
                 <span className="badge gray mono">{bp.image}</span>
                 <span className="badge blue">{bp.ports.length} port{bp.ports.length === 1 ? '' : 's'}</span>
                 <span className="badge amber">Startup: {bp.startup}</span>
+                {bp.mcCatalog && mc?.versions?.release && (
+                  <span className="badge cyan" title="New servers deploy the latest release automatically.">
+                    <Icon name="box" size={12} /> MC {mc.versions.release.id} · Java {mc.versions.defaultJava}
+                  </span>
+                )}
               </div>
             )}
           </div>

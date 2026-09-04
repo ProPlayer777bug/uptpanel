@@ -1,14 +1,22 @@
-// Panel → Node Agent HTTP client (like Pterodactyl Panel → Wings).
-// The agent runs on each node and manages Docker; the panel calls it over HTTP.
+// Panel → Wings daemon HTTP client (Pterodactyl-style connection model).
+// The daemon runs on each node and manages the server's container(s); the
+// panel calls it over HTTP/WS using the Wings REST paths:
 //
-// Every request is authenticated with a short-lived, replay-protected HMAC
-// signature (Pterodactyl-style). The signature binds the HTTP method, the
-// request path (incl. query), a unique request id, the signing timestamp, the
-// target node id and the sha256 of the raw body, all keyed by the node's
-// shared secret (agent token). The agent independently verifies the same
-// canonical string, so a captured request cannot be replayed elsewhere.
+//	/api/system                          health
+//	/api/servers/:id                     (DELETE) remove container
+//	/api/servers/:id/power               {action} start|stop|restart|kill
+//	/api/servers/:id/commands            {commands:[...]} or {command}
+//	/api/servers/:id/logs?tail=N         fetch recent logs
+//	/api/servers/:id/stats               live resource stats
+//	/api/servers/:id/files/...           file operations
+//	/api/servers/:id/backups/...         backup archive operations
+//	/api/servers/:id/reinstall           wipe data dir
+//	/api/servers/:id/ws                  Wings JSON console protocol
+//
+// Every request authenticates with the node's daemon token in the
+// Authorization: Bearer header, exactly like Wings' RequireAuthorization
+// middleware expects.
 import { nanoid } from 'nanoid'
-import { createHmac, createHash, randomUUID } from 'node:crypto'
 
 export interface AgentInfo {
   id: string
@@ -24,14 +32,6 @@ export interface AgentInfo {
   reachedAt: number
 }
 
-function bodyHash(raw: string | undefined | null): string {
-  return createHash('sha256').update(raw || '').digest('hex')
-}
-
-function canonical(method: string, path: string, requestID: string, timestampSec: string, nodeID: string, rawBody: string): string {
-  return `${method}\n${path}\n${requestID}\n${timestampSec}\n${nodeID}\n${bodyHash(rawBody)}`
-}
-
 export class AgentClient {
   constructor(
     private baseUrl: string,
@@ -39,31 +39,12 @@ export class AgentClient {
     private nodeId: string,
   ) {}
 
-  private signature(method: string, path: string, rawBody: string) {
-    const xRequestId = randomUUID()
-    const xTimestamp = String(Math.floor(Date.now() / 1000))
-    const xSignature = createHmac('sha256', this.token)
-      .update(canonical(method, path, xRequestId, xTimestamp, this.nodeId, rawBody))
-      .digest('hex')
-    return { xRequestId, xTimestamp, xSignature }
-  }
-
-  private signedHeaders(method: string, path: string, rawBody: string): Record<string, string> {
-    const s = this.signature(method, path, rawBody)
-    return {
-      'x-node-id': this.nodeId,
-      'x-request-id': s.xRequestId,
-      'x-timestamp': s.xTimestamp,
-      'x-signature': s.xSignature,
-    }
-  }
-
   private async req<T = any>(method: string, path: string, body?: unknown): Promise<T> {
     const url = `${this.baseUrl.replace(/\/$/, '')}${path}`
     const rawBody = body != null ? JSON.stringify(body) : ''
     const headers: Record<string, string> = {
+      authorization: `Bearer ${this.token}`,
       'content-type': 'application/json',
-      ...this.signedHeaders(method, path, rawBody),
     }
     const res = await this.fetchTls(url, {
       method,
@@ -72,7 +53,7 @@ export class AgentClient {
     })
     if (!res.ok) {
       const text = await res.text().catch(() => '')
-      const err: any = new Error(`agent ${res.status}: ${text.slice(0, 200)}`)
+      const err: any = new Error(`wings ${res.status}: ${text.slice(0, 200)}`)
       err.agentStatus = res.status
       throw err
     }
@@ -80,7 +61,7 @@ export class AgentClient {
   }
 
   // fetchTls wraps the global fetch, optionally relaxing TLS certificate
-  // verification for local/dev nodes whose agent runs a self-signed cert.
+  // verification for local/dev nodes whose daemon runs a self-signed cert.
   // This is an explicit opt-in escape hatch (UH_AGENT_INSECURE=1) and MUST
   // NOT be enabled in production.
   private async fetchTls(url: string, init: RequestInit): Promise<Response> {
@@ -94,73 +75,75 @@ export class AgentClient {
   ping() {
     return this.req('GET', '/api/system')
   }
+
+  // ---- Server lifecycle (Wings-style) ----
   list() {
+    // Wings GET /api/servers returns the full server list; our daemon exposes
+    // /api/containers for enumeration, keep both working.
     return this.req<{ containers: any[] }>('GET', '/api/containers')
   }
-
-  // ---- Container lifecycle ----
   createContainer(payload: unknown) {
-    return this.req('POST', '/api/containers', payload)
+    return this.req('POST', '/api/servers', payload)
   }
-  power(containerId: string, action: string) {
-    return this.req('POST', `/api/containers/${containerId}/power`, { action })
+  power(serverId: string, action: string) {
+    return this.req('POST', `/api/servers/${serverId}/power`, { action, wait_seconds: 30 })
   }
-  remove(containerId: string) {
-    return this.req('DELETE', `/api/containers/${containerId}`)
+  remove(serverId: string) {
+    return this.req('DELETE', `/api/servers/${serverId}`)
   }
-  stats(containerId: string) {
-    return this.req('GET', `/api/containers/${containerId}/stats`)
+  stats(serverId: string) {
+    return this.req('GET', `/api/servers/${serverId}/stats`)
   }
-  command(containerId: string, cmd: string) {
-    return this.req('POST', `/api/containers/${containerId}/command`, { command: cmd })
+  command(serverId: string, cmd: string) {
+    return this.req('POST', `/api/servers/${serverId}/commands`, { commands: [cmd] })
   }
 
   // ---- Files ----
-  listFiles(containerId: string, path: string) {
-    return this.req('GET', `/api/containers/${containerId}/files?path=${encodeURIComponent(path)}`)
+  listFiles(serverId: string, path: string) {
+    return this.req('GET', `/api/servers/${serverId}/files?path=${encodeURIComponent(path)}`)
   }
-  readFile(containerId: string, path: string) {
-    return this.req('GET', `/api/containers/${containerId}/files/content?path=${encodeURIComponent(path)}`)
+  readFile(serverId: string, path: string) {
+    return this.req('GET', `/api/servers/${serverId}/files/content?path=${encodeURIComponent(path)}`)
   }
-  writeFile(containerId: string, path: string, content: string) {
-    return this.req('POST', `/api/containers/${containerId}/files/write`, { path, content })
+  writeFile(serverId: string, path: string, content: string) {
+    return this.req('POST', `/api/servers/${serverId}/files/write`, { path, content })
   }
-  downloadFile(containerId: string, path: string, url: string) {
-    return this.req('POST', `/api/containers/${containerId}/files/download`, { path, url })
+  downloadFile(serverId: string, path: string, url: string) {
+    return this.req('POST', `/api/servers/${serverId}/files/download`, { path, url })
   }
-  containerLogs(containerId: string, tail?: number) {
-    return this.req('GET', `/api/containers/${containerId}/logs?tail=${tail || 200}`)
+  containerLogs(serverId: string, tail?: number) {
+    return this.req('GET', `/api/servers/${serverId}/logs?tail=${tail || 200}`)
   }
 
   // ---- Backups (real ZIP archives on the node) ----
-  createBackup(containerId: string, name: string, uuid: string) {
-    return this.req('POST', `/api/containers/${containerId}/backups`, { name, uuid })
+  createBackup(serverId: string, name: string, uuid: string) {
+    return this.req('POST', `/api/servers/${serverId}/backups`, { name, uuid })
   }
-  restoreBackup(containerId: string, name: string) {
-    return this.req('POST', `/api/containers/${containerId}/backups/restore`, { name })
+  restoreBackup(serverId: string, name: string) {
+    return this.req('POST', `/api/servers/${serverId}/backups/restore`, { name })
   }
-  deleteBackup(containerId: string, name: string) {
-    return this.req('DELETE', `/api/containers/${containerId}/backups?name=${encodeURIComponent(name)}`)
+  deleteBackup(serverId: string, name: string) {
+    return this.req('DELETE', `/api/servers/${serverId}/backups?name=${encodeURIComponent(name)}`)
   }
   // Returns a raw fetch Response so the panel can stream bytes through.
-  downloadBackup(containerId: string, name: string): Promise<Response> {
-    const path = `/api/containers/${containerId}/backups?name=${encodeURIComponent(name)}`
+  downloadBackup(serverId: string, name: string): Promise<Response> {
+    const path = `/api/servers/${serverId}/backups?name=${encodeURIComponent(name)}`
     const url = `${this.baseUrl.replace(/\/$/, '')}${path}`
     return this.fetchTls(url, {
       method: 'GET',
-      headers: this.signedHeaders('GET', path, ''),
+      headers: { authorization: `Bearer ${this.token}` },
     })
   }
 
   // ---- Reinstall / destroy data ----
-  reinstall(containerId: string) {
-    return this.req('POST', `/api/containers/${containerId}/reinstall`)
+  reinstall(serverId: string) {
+    return this.req('POST', `/api/servers/${serverId}/reinstall`)
   }
 
   // Checks whether a container currently exists on the node.
-  async exists(containerId: string): Promise<boolean> {
+  async exists(serverId: string): Promise<boolean> {
     const { containers } = await this.list()
-    return containers.some((c: any) => c.serverId === containerId || c.name === `uh_${containerId}`)
+    return containers.some((c: any) => c.serverId === serverId || c.name === `uh_${serverId}`)
   }
 }
 

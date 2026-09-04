@@ -27,6 +27,7 @@ interface AppState {
   canAdmin: boolean
   login: (email: string, password: string) => Promise<void>
   register: (name: string, email: string, password: string) => Promise<void>
+  authenticate: (res: { token: string; user: any }) => Promise<void>
   logout: () => Promise<void>
   refresh: () => Promise<void>
 }
@@ -62,20 +63,20 @@ export function AppProvider({ children }: { children: ReactNode }) {
 
   const login = async (email: string, password: string) => {
     const res = await api.post('/auth/login', { email, password })
-    if (!res.token) throw new Error('Login failed')
-    setToken(res.token)
-    setTok(res.token)
-    setUser(res.user)
-    const ctx = await api.get('/session/context')
-    setSummary(ctx.summary)
+    await authenticate(res)
   }
 
   const register = async (name: string, email: string, password: string) => {
     const res = await api.post('/auth/register', { name, email, password })
-    if (!res.token) throw new Error('Registration failed')
+    await authenticate(res)
+  }
+
+  // Persist a session established by any auth method (password, OTP, OAuth).
+  const authenticate = async (res: { token?: string; user?: any }) => {
+    if (!res.token) throw new Error('Authentication failed')
     setToken(res.token)
     setTok(res.token)
-    setUser(res.user)
+    setUser(res.user || null)
     const ctx = await api.get('/session/context')
     setSummary(ctx.summary)
   }
@@ -89,7 +90,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
   }
 
   return (
-    <Ctx.Provider value={{ user, token, summary, booting, canAdmin: isAdminRole(user?.role), login, register, logout, refresh }}>
+    <Ctx.Provider value={{ user, token, summary, booting, canAdmin: isAdminRole(user?.role), login, register, authenticate, logout, refresh }}>
       {children}
     </Ctx.Provider>
   )

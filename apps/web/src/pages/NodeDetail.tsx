@@ -4,6 +4,7 @@ import { usePoll } from '../api/hooks'
 import { api } from '../api/client'
 import { useApp } from '../state/auth'
 import { Icon, Spinner, Modal, toast } from '../components/ui'
+import { Shell } from '../components/Shell'
 import type { Node, Server } from '@uptimehost/types'
 
 type Section =
@@ -57,48 +58,50 @@ export function NodeDetail() {
   if (!node) return <div className="center" style={{ padding: 80, color: 'var(--text-3)' }}>Node not found</div>
 
   return (
-    <div className="page">
-      <div className="page-h">
-        <a className="text-3 sm" onClick={() => navigate('/nodes')} style={{ cursor: 'pointer' }}>Nodes</a>
-        <span className="text-3 sm">/</span>
-        <h1>{node.name}</h1>
-        <NodeStatusBadge node={node} />
-        <span className="mono xs text-3">{node.id}</span>
-        <div style={{ flex: 1 }} />
-        <button className="btn sm" onClick={async () => { await api.post(`/nodes/${id}/refresh`, {}); toast.ok('Node health refreshed'); refetch() }}>
-          <Icon name="restart" size={13} /> Refresh
-        </button>
-      </div>
+    <Shell>
+      <div className="page">
+        <div className="page-h">
+          <a className="text-3 sm" onClick={() => navigate('/nodes')} style={{ cursor: 'pointer' }}>Nodes</a>
+          <span className="text-3 sm">/</span>
+          <h1>{node.name}</h1>
+          <NodeStatusBadge node={node} />
+          <span className="mono xs text-3">{node.id}</span>
+          <div style={{ flex: 1 }} />
+          <button className="btn sm" onClick={async () => { await api.post(`/nodes/${id}/refresh`, {}); toast.ok('Node health refreshed'); refetch() }}>
+            <Icon name="restart" size={13} /> Refresh
+          </button>
+        </div>
 
-      <div className="node-layout">
-        <nav className="node-nav card">
-          {SECTIONS.map((s) => (
-            <button key={s.id} className={`node-nav-item ${section === s.id ? 'active' : ''}`} onClick={() => setSection(s.id)}>
-              <Icon name={s.icon} size={14} /><span>{s.label}</span>
-            </button>
-          ))}
-        </nav>
-        <div className="node-body">
-          {section === 'overview' && <Overview node={node} servers={servers} onSection={setSection} />}
-          {section === 'general' && <General node={node} onSaved={refetch} />}
-          {section === 'resources' && <Resources node={node} onSaved={refetch} />}
-          {section === 'allocations' && <Allocations node={node} />}
-          {section === 'storage' && <Storage node={node} onSaved={refetch} />}
-          {section === 'docker' && <Docker node={node} onSaved={refetch} />}
-          {section === 'images' && <Images node={node} onSaved={refetch} />}
-          {section === 'defaults' && <Defaults node={node} onSaved={refetch} />}
-          {section === 'backups' && <Backups node={node} onSaved={refetch} />}
-          {section === 'sftp' && <SFTP node={node} onSaved={refetch} />}
-          {section === 'agent' && <Agent node={node} onSaved={refetch} />}
-          {section === 'health' && <Health node={node} />}
-          {section === 'logs' && <Logs node={node} />}
-          {section === 'activity' && <Activity node={node} />}
-          {section === 'security' && <Security node={node} onSaved={refetch} />}
-          {section === 'maintenance' && <Maintenance node={node} onSaved={refetch} />}
-          {section === 'danger' && <Danger node={node} onDeleted={() => { refresh(); navigate('/nodes') }} />}
+        <div className="node-layout">
+          <nav className="node-nav card">
+            {SECTIONS.map((s) => (
+              <button key={s.id} className={`node-nav-item ${section === s.id ? 'active' : ''}`} onClick={() => setSection(s.id)}>
+                <Icon name={s.icon} size={14} /><span>{s.label}</span>
+              </button>
+            ))}
+          </nav>
+          <div className="node-body">
+            {section === 'overview' && <Overview node={node} servers={servers} onSection={setSection} onRefresh={refetch} />}
+            {section === 'general' && <General node={node} onSaved={refetch} />}
+            {section === 'resources' && <Resources node={node} onSaved={refetch} />}
+            {section === 'allocations' && <Allocations node={node} />}
+            {section === 'storage' && <Storage node={node} onSaved={refetch} />}
+            {section === 'docker' && <Docker node={node} onSaved={refetch} />}
+            {section === 'images' && <Images node={node} onSaved={refetch} />}
+            {section === 'defaults' && <Defaults node={node} onSaved={refetch} />}
+            {section === 'backups' && <Backups node={node} onSaved={refetch} />}
+            {section === 'sftp' && <SFTP node={node} onSaved={refetch} />}
+            {section === 'agent' && <Agent node={node} onSaved={refetch} />}
+            {section === 'health' && <Health node={node} />}
+            {section === 'logs' && <Logs node={node} />}
+            {section === 'activity' && <Activity node={node} />}
+            {section === 'security' && <Security node={node} onSaved={refetch} />}
+            {section === 'maintenance' && <Maintenance node={node} onSaved={refetch} />}
+            {section === 'danger' && <Danger node={node} onDeleted={() => { refresh(); navigate('/nodes') }} />}
+          </div>
         </div>
       </div>
-    </div>
+    </Shell>
   )
 }
 
@@ -145,7 +148,53 @@ function Field({ label, children, hint }: any) {
 }
 
 /* ------------------------------------------------------------------ 1. Overview */
-function Overview({ node, servers, onSection }: { node: Node; servers: Server[]; onSection: (s: Section) => void }) {
+function InstallPanel({ node, onRegenerated }: { node: Node; onRegenerated: () => void }) {
+  const cmd = node.installCommand || 'No install command generated for this node yet.'
+  const [copied, setCopied] = useState(false)
+  const copy = async () => {
+    try { await navigator.clipboard.writeText(cmd); setCopied(true); setTimeout(() => setCopied(false), 1800) }
+    catch { /* clipboard unavailable */ }
+  }
+  const dl = () => {
+    const blob = new Blob([cmd], { type: 'text/plain;charset=utf-8' })
+    const a = document.createElement('a')
+    a.href = URL.createObjectURL(blob)
+    a.download = `${node.id}-install.sh`
+    a.click()
+    URL.revokeObjectURL(a.href)
+  }
+  const regen = async () => {
+    try { await api.post(`/nodes/${node.id}/install`, {}); toast.ok('Install command regenerated'); onRegenerated() }
+    catch (e: any) { toast.err(e?.message) }
+  }
+  return (
+    <div className="card">
+      <div className="card-h">
+        <Icon name="terminal" size={15} /> Configuration
+        {node.status === 'online'
+          ? <span className="h-sub" style={{ marginLeft: 8 }}><span className="badge green"><span className="dot" /> Agent connected</span></span>
+          : <span className="h-sub" style={{ marginLeft: 8 }}><span className="badge amber"><span className="dot" /> Awaiting agent</span></span>}
+      </div>
+      <div className="card-b" style={{ display: 'grid', gap: 14 }}>
+        <div className="info-row"><span className="k">Agent address</span><span className="mono sm">{node.agentUrl || '—'}</span></div>
+        <div className="info-row"><span className="k">Scheme / TLS</span>{node.scheme === 'https' ? <span className="badge green"><span className="dot" /> HTTPS</span> : <span className="badge amber">HTTP</span>}</div>
+        <div className="info-row"><span className="k">Docker</span>{node.dockerHealthy ? <span className="badge green"><span className="dot" /> healthy</span> : <span className="badge gray">—</span>}</div>
+        <div>
+          <div className="flex justify-between sm mb-1"><span className="text-2 bold">One-command install</span><span className="xs text-3">Paste this on the node machine to register it.</span></div>
+          <pre className="code-block" style={{ maxHeight: 260, overflow: 'auto' }}>{cmd}</pre>
+        </div>
+        <div className="flex gap-2" style={{ alignItems: 'center', flexWrap: 'wrap' }}>
+          <button className="btn" onClick={copy}><Icon name="copy" size={13} /> {copied ? 'Copied' : 'Copy command'}</button>
+          <button className="btn" onClick={dl}><Icon name="download" size={13} /> Download</button>
+          <button className="btn ghost sm" onClick={regen}><Icon name="refresh" size={13} /> Regenerate token</button>
+          <span className="xs text-3" style={{ marginLeft: 'auto' }}>Regenerating issues a new registration token.</span>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+function Overview({ node, servers, onSection, onRefresh }: { node: Node; servers: Server[]; onSection: (s: Section) => void; onRefresh: () => void }) {
   const navigate = useNavigate()
   const hs = node.hostStats
   const memPct = pct(hs?.memoryPercent)
@@ -154,6 +203,7 @@ function Overview({ node, servers, onSection }: { node: Node; servers: Server[];
   const loc = node.locationId
   return (
     <div className="grid gap-3">
+      <InstallPanel node={node} onRegenerated={onRefresh} />
       <div className="card">
         <div className="card-h"><Icon name="node" size={15} /> Node overview</div>
         <div className="card-b">
@@ -383,13 +433,16 @@ function Allocations({ node }: { node: Node }) {
             <div className="empty"><h3 className="sm text-3">No allocations yet. Add a port (or a port range) for this node.</h3></div>
           ) : (
             <table className="dtable">
-              <thead><tr><th>Bind IP</th><th>Port</th><th>Public address ({fqdn})</th><th>Primary</th><th></th></tr></thead>
+              <thead><tr><th>Bind IP</th><th>Port</th><th>Public address</th><th>Primary</th><th></th></tr></thead>
               <tbody>
                 {allocs.map((a: any) => (
                   <tr key={a.id}>
                     <td className="mono sm">{a.ip}</td>
                     <td className="mono sm">{a.port}</td>
-                    <td className="mono sm">{fqdn}:{a.port} <span className="xs text-3">→ 0.0.0.0:{a.port}</span></td>
+                    <td className="mono sm">
+                      {(a.alias || fqdn)}:{a.port}
+                      {a.alias && a.alias !== fqdn ? <span className="xs text-3"> → {fqdn}:{a.port}</span> : null}
+                    </td>
                     <td>{a.primary || a.id === primaryId ? <span className="badge green"><span className="dot" /> primary</span> : <button className="btn sm subtle" onClick={() => setPrimary(a)}>Set primary</button>}</td>
                     <td style={{ textAlign: 'right' }}><button className="btn sm danger icon" onClick={() => delAlloc(a)} title="Delete"><Icon name="trash" size={13} /></button></td>
                   </tr>
@@ -410,11 +463,14 @@ function AddAllocationModal({ open, onClose, node, fqdn, onDone }: any) {
   const [bulk, setBulk] = useState(false)
   const [start, setStart] = useState(25565)
   const [end, setEnd] = useState(25566)
+  const [alias, setAlias] = useState('')
   const [busy, setBusy] = useState(false)
-  useEffect(() => { if (open) { setIp('0.0.0.0'); setPort(25565); setBulk(false); setStart(25565); setEnd(25566) } }, [open])
+  useEffect(() => { if (open) { setIp('0.0.0.0'); setPort(25565); setBulk(false); setStart(25565); setEnd(25566); setAlias('') } }, [open])
   const create = async () => {
     setBusy(true)
-    const body = bulk ? { ip, startPort: start, endPort: end, total: end - start + 1 } : { ip, port }
+    const body = bulk
+      ? { ip, startPort: start, endPort: end, total: end - start + 1, alias: alias || undefined }
+      : { ip, port, alias: alias || undefined }
     try { await api.post(`/nodes/${node.id}/allocations`, body); toast.ok(bulk ? `Created ${end - start + 1} allocations` : 'Allocation created'); onDone(); onClose() }
     catch (e: any) { toast.err(e?.message) } finally { setBusy(false) }
   }
@@ -430,6 +486,7 @@ function AddAllocationModal({ open, onClose, node, fqdn, onDone }: any) {
       ) : (
         <div className="field"><label>Port</label><input className="input mono" type="number" value={port} onChange={(e) => setPort(Number(e.target.value))} /></div>
       )}
+      <div className="field mb-2"><label>Public alias (hostname)</label><input className="input mono" value={alias} onChange={(e) => setAlias(e.target.value)} placeholder="play.test.in" /><span className="xs text-3">Optional hostname shown to players instead of the raw IP. The port is appended (e.g. play.test.in:25574).</span></div>
       <p className="xs text-3 mt-3">Public address: <b className="mono">{fqdn}:{bulk ? `${start}-${end}` : port}</b> → <b className="mono">{ip}:{bulk ? `${start}-${end}` : port}</b></p>
       <div className="actions">
         <button className="btn" onClick={onClose}>Cancel</button>

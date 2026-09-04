@@ -3,6 +3,7 @@ import { useLocations, useNodes } from '../api/hooks'
 import { api } from '../api/client'
 import { useApp } from '../state/auth'
 import { Icon, Modal, Spinner, toast } from '../components/ui'
+import { Shell } from '../components/Shell'
 
 export function Locations() {
   const { locations, loading, refetch } = useLocations()
@@ -20,42 +21,44 @@ export function Locations() {
   }
 
   return (
-    <div className="page">
-      <div className="page-h">
-        <h1>Locations</h1>
-        <span className="sub">{locations.length} total</span>
-        <div style={{ flex: 1 }} />
-        <button className="btn primary sm" onClick={() => setCreate(true)}><Icon name="plus" size={14} /> Add location</button>
-      </div>
-
-      {loading ? (
-        <div className="center" style={{ padding: 60 }}><Spinner size={26} /></div>
-      ) : locations.length === 0 ? (
-        <div className="card"><div className="empty"><Icon name="map" size={24} className="accent" /><h3>No locations</h3><p>Locations group nodes by region. Create one to organise your infrastructure.</p><div className="mt-3"><button className="btn primary sm" onClick={() => setCreate(true)}><Icon name="plus" size={14} /> Add location</button></div></div></div>
-      ) : (
-        <div className="card anim-in">
-          <table className="dtable">
-            <thead><tr><th>Location</th><th>Code</th><th>Description</th><th>Nodes</th><th></th></tr></thead>
-            <tbody>
-              {locations.map((l) => {
-                const count = nodes.filter((n) => n.locationId === l.id).length
-                return (
-                  <tr key={l.id}>
-                    <td><div className="cell-main">{l.name}</div><div className="cell-sub mono xs">{l.id}</div></td>
-                    <td><span className="badge gray mono">{l.shortCode}</span></td>
-                    <td className="text-2">{l.description || '—'}</td>
-                    <td><span className="badge cyan">{count}</span></td>
-                    <td style={{ textAlign: 'right' }}><button className="btn sm ghost" onClick={() => del(l.id, l.name)}><Icon name="trash" size={13} /></button></td>
-                  </tr>
-                )
-              })}
-            </tbody>
-          </table>
+    <Shell>
+      <div className="page">
+        <div className="page-h">
+          <h1>Locations</h1>
+          <span className="sub">{locations.length} total</span>
+          <div style={{ flex: 1 }} />
+          <button className="btn primary sm" onClick={() => setCreate(true)}><Icon name="plus" size={14} /> Add location</button>
         </div>
-      )}
 
-      {create && <CreateLocation onClose={() => { setCreate(false); refetch(); refresh() }} />}
-    </div>
+        {loading ? (
+          <div className="center" style={{ padding: 60 }}><Spinner size={26} /></div>
+        ) : locations.length === 0 ? (
+          <div className="card"><div className="empty"><Icon name="map" size={24} className="accent" /><h3>No locations</h3><p>Locations group nodes by region. Create one to organise your infrastructure.</p><div className="mt-3"><button className="btn primary sm" onClick={() => setCreate(true)}><Icon name="plus" size={14} /> Add location</button></div></div></div>
+        ) : (
+          <div className="card anim-in">
+            <table className="dtable">
+              <thead><tr><th>Location</th><th>Code</th><th>Description</th><th>Nodes</th><th></th></tr></thead>
+              <tbody>
+                {locations.map((l) => {
+                  const count = nodes.filter((n) => n.locationId === l.id).length
+                  return (
+                    <tr key={l.id}>
+                      <td><div className="cell-main">{l.name}</div><div className="cell-sub mono xs">{l.id}</div></td>
+                      <td><span className="badge gray mono">{l.shortCode}</span></td>
+                      <td className="text-2">{l.description || '—'}</td>
+                      <td><span className="badge cyan">{count}</span></td>
+                      <td style={{ textAlign: 'right' }}><button className="btn sm ghost" onClick={() => del(l.id, l.name)}><Icon name="trash" size={13} /></button></td>
+                    </tr>
+                  )
+                })}
+              </tbody>
+            </table>
+          </div>
+        )}
+
+        {create && <CreateLocation onClose={() => { setCreate(false); refetch(); refresh() }} />}
+      </div>
+    </Shell>
   )
 }
 

@@ -13,7 +13,8 @@
     "@fastify/rate-limit": "^9.0.0",
     "@fastify/websocket": "^10.0.1",
     "fastify": "^4.28.1",
-    "nanoid": "^5.0.7"
+    "nanoid": "^5.0.7",
+    "ssh2": "^1.17.0"
   },
   "devDependencies": {
     "@types/node": "^20.14.0",

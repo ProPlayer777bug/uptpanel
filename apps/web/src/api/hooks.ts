@@ -35,7 +35,23 @@ export function usePoll<T>(fetcher: () => Promise<T>, deps: unknown[] = [], inte
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [depsKey, interval])
 
-  return { data, loading, error, refetch: useCallback(() => { setLoading(true); cb.current() }, []) }
+  return {
+    data, loading, error,
+    // refetch re-runs the fetcher and writes its result straight back into state
+    // (immediately, without waiting for the next poll tick). Used by manual
+    // "Refresh" buttons and onSaved/onDone handlers across the app.
+    refetch: useCallback(async () => {
+      setLoading(true)
+      try {
+        const d = await cb.current()
+        setData(d); setError(null)
+      } catch (e: any) {
+        setError(e?.message || 'Error')
+      } finally {
+        setLoading(false)
+      }
+    }, []),
+  }
 }
 
 export function useServers() {
@@ -64,6 +80,10 @@ export function useServer(id: string | undefined) {
     [id],
     id ? 6000 : 0,
   )
+}
+
+export function useActivity(limit = 20) {
+  return usePoll<{ activity: any[] }>(async () => api.get(`/activity?limit=${limit}`), [limit], 10000)
 }
 
 export async function powerAction(id: string, action: 'start' | 'stop' | 'restart' | 'kill') {

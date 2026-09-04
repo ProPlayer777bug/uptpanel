@@ -6,11 +6,44 @@ import { hashPw, verifyPw } from '../sim/seed.js'
 
 const SESSION_TTL = 7 * 24 * 3600 * 1000
 
+// API keys: per-server keys start with sk_, account keys with ak_. Tokens are
+// high-entropy and stored in plaintext (they are shown once at creation).
+export function generateKeyToken(scope: 'server' | 'account') {
+  const prefix = scope === 'server' ? 'sk_' : 'ak_'
+  return prefix + nanoid(48)
+}
+
 export function requireAuth(req: FastifyRequest, store: Store) {
-  const token = req.headers.authorization?.replace(/^Bearer\s+/i, '') || ''
-  const session = store.db.sessions.find((s) => s.token === token)
-  if (!session || session.expiresAt < Date.now()) return null
-  return store.db.users.find((u) => u.id === session.userId) || null
+  const raw = req.headers.authorization?.replace(/^Bearer\s+/i, '') || ''
+  // 1. Normal logged-in session (opaque token).
+  const session = store.db.sessions.find((s) => s.token === raw)
+  if (session && session.expiresAt > Date.now()) {
+    return store.db.users.find((u) => u.id === session.userId) || null
+  }
+  // 2. API key — either a per-server key (scoped to one server) or an account
+  //    key. We return a synthetic user that carries the key's scope so the
+  //    existing authz helpers enforce it without touching every route.
+  if (raw.startsWith('sk_') || raw.startsWith('ak_')) {
+    const key = store.db.apiKeys.find((k) => k.token === raw)
+    if (!key) return null
+    const owner = store.db.users.find((u) => u.id === key.userId)
+    if (!owner) return null
+    if (key.permissions?.view === false) return null
+    key.lastUsedAt = Date.now()
+    return {
+      id: owner.id,
+      email: owner.email,
+      name: owner.name,
+      // Preserve the owner's real role so global-admin account keys are treated
+      // as admins everywhere (isGlobalAdmin/visibleServers). The key marker
+      // below lets serverAccess enforce per-server vs account scoping.
+      role: owner.role,
+      avatarHue: owner.avatarHue,
+      passwordHash: owner.passwordHash,
+      key: { scope: key.scope, serverId: key.serverId, permissions: key.permissions, id: key.id, userId: owner.id },
+    }
+  }
+  return null
 }
 
 export function createSession(store: Store, userId: string) {
@@ -51,6 +84,18 @@ function roleRank(role: string | undefined): number {
 // access through a matching access entry (by email) or if they own the server.
 export function serverAccess(user: any, server: any, store: Store): { ok: boolean; permissions: Record<string, boolean> } {
   if (!user) return { ok: false, permissions: {} }
+  // API-key scoping: a server key only touches its own server; an account key
+  // acts as its owner (global-admin account keys manage everything).
+  if (user.key) {
+    if (user.key.scope === 'server') {
+      const perms = user.key.permissions || defaultServerPerms('developer')
+      const ok = server.id === user.key.serverId && perms.view === true
+      return { ok, permissions: ok ? perms : {} }
+    }
+    // account key
+    if (roleRank(user.role) >= 4) return { ok: true, permissions: { view: true, command: true, files: true, modify: true, access: true, admin: true } }
+    // account key owned by a non-admin user: fall through to owner/access logic
+  }
   if (roleRank(user.role) >= 4) return { ok: true, permissions: { view: true, command: true, files: true, modify: true, access: true, admin: true } }
 
   const entry = store.db.access.find((a) => a.serverId === server.id && a.email === user.email)
@@ -58,7 +103,7 @@ export function serverAccess(user: any, server: any, store: Store): { ok: boolea
   // Owner-by-email implicitly has full rights.
   const isOwner = server.ownerEmail && server.ownerEmail === user.email
   if (isOwner) return { ok: true, permissions: { view: true, command: true, files: true, modify: true, access: true, admin: true } }
-  if (entry) return { ok: entry.permissions.view === true, permissions: perms }
+  if (entry) return { ok: perms.view === true, permissions: perms }
   return { ok: false, permissions: {} }
 }
 

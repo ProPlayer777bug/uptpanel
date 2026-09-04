@@ -29,8 +29,12 @@ export function seed(store: Store) {
   })
 
   db.blueprints.push(
-    bp('bp-minecraft', 'Minecraft Java', 'Game', 'itzg/minecraft-server:java21', '{{JAVA_OPTS}} -jar server.jar nogui', 'stop', { EULA: 'TRUE', MEMORY: '2G', TYPE: 'VANILLA' }, [25565], 200, 4096, 10),
-    bp('bp-paper', 'Minecraft Paper', 'Game', 'ghcr.io/pterodactyl/yolks:java_21', 'java -Xms{{MEM_MIN}}M -Xmx{{MEM_MAX}}M -jar server.jar nogui', 'stop', { EULA: 'TRUE' }, [25565], 250, 6144, 15),
+    // Minecraft catalog blueprints are version-aware: the image and startup are
+    // resolved per-server from the Mojang version manifest at creation time, so
+    // the image here is only a sensible fallback. Vanilla downloads Mojang's
+    // server.jar; Paper downloads the matching PaperMC build.
+    bp('bp-minecraft', 'Minecraft Java', 'Game', 'ghcr.io/pterodactyl/yolks:java_21', 'java -Xms128M -XX:MaxRAMPercentage=95.0 -jar server.jar nogui', 'stop', { EULA: 'TRUE' }, [25565], 200, 4096, 10),
+    bp('bp-paper', 'Minecraft Paper', 'Game', 'ghcr.io/pterodactyl/yolks:java_21', 'java -Xms128M -XX:MaxRAMPercentage=95.0 -jar server.jar nogui', 'stop', { EULA: 'TRUE' }, [25565], 250, 6144, 15),
     bp('bp-node', 'Node.js App', 'Application', 'node:20-bookworm', 'node server.js', 'SIGTERM', { NODE_ENV: 'production', PORT: '3000' }, [3000], 100, 1024, 5),
     bp('bp-postgres', 'PostgreSQL', 'Database', 'postgres:16', 'postgres', 'fast', { POSTGRES_PASSWORD: '{{DB_PASSWORD}}' }, [5432], 150, 2048, 20),
     bp('bp-terraria', 'Terraria', 'Game', 'ghcr.io/parkervcp/yolks:terraria_1449', './TerrariaServer -config serverconfig.txt', 'exit', {}, [7777], 200, 3072, 8),

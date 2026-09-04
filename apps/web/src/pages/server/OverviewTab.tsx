@@ -26,23 +26,51 @@ export function OverviewTab({ server }: { server: Server }) {
 
   return (
     <div>
+      {/* Stat blocks row */}
       <div className="grid cols-4 mb-4">
-        <StatBlock icon="cpu" label="CPU" value={cpu >= 0.05 ? `${cpu}%` : '0%'} sub={`${server.cpuPercent}% cap`} tone="var(--cyan)" />
-        <StatBlock icon="down" label="Memory" value={`${stats.memoryUsedMb ?? 0} MB`} sub={`of ${server.memoryLimitMb} MB`} tone="var(--accent)" />
-        <StatBlock icon="activity" label="Processes" value={`${stats.pids ?? 0}`} sub="container pids" tone="var(--good)" />
-        <StatBlock icon="snap" label="Network" value={`${(stats.networkTxMb ?? 0).toFixed(2)} MB`} sub={`TX ${(stats.networkTxMb ?? 0).toFixed(2)} · RX ${(stats.networkRxMb ?? 0).toFixed(2)}`} tone="var(--info)" />
+        <PStatBlock
+          icon="cpu" label="CPU"
+          value={cpu >= 0.05 ? `${cpu}%` : '0%'}
+          sub={`${server.cpuPercent}% cap`}
+          iconCls="cyan" barColor="var(--cyan-strong)"
+          barPct={cpu}
+        />
+        <PStatBlock
+          icon="down" label="Memory"
+          value={`${stats.memoryUsedMb ?? 0} MB`}
+          sub={`of ${server.memoryLimitMb} MB`}
+          iconCls="amber" barColor="var(--cyan)"
+          barPct={memPct ?? 0}
+        />
+        <PStatBlock
+          icon="activity" label="Processes"
+          value={`${stats.pids ?? 0}`}
+          sub="container pids"
+          iconCls="green" barColor="var(--good)"
+          barPct={0}
+        />
+        <PStatBlock
+          icon="snap" label="Network"
+          value={`${(stats.networkTxMb ?? 0).toFixed(2)} MB`}
+          sub={`TX ${(stats.networkTxMb ?? 0).toFixed(2)} · RX ${(stats.networkRxMb ?? 0).toFixed(2)}`}
+          iconCls="blue" barColor="var(--info)"
+          barPct={0}
+        />
       </div>
 
       <div className="grid cols-2">
         <div>
+          {/* Resource usage */}
           <div className="card mb-4">
-            <div className="card-h">Resource usage</div>
+            <div className="card-h">Resource Usage</div>
             <div className="card-b" style={{ display: 'grid', gap: 16 }}>
-              <MetricBar label="CPU" value={stats.cpuPercent ?? 0} max={100} color="var(--cyan)" display={`${stats.cpuPercent != null ? cpu.toFixed(2) : 0}%`} />
-              <MetricBar label="Memory" value={memPct ?? 0} max={100} color="var(--accent)" display={`${stats.memoryUsedMb ?? 0} MB / ${server.memoryLimitMb} MB`} />
+              <MetricBar label="CPU" value={stats.cpuPercent ?? 0} max={100} color="var(--cyan-strong)" display={`${stats.cpuPercent != null ? cpu.toFixed(2) : 0}%`} />
+              <MetricBar label="Memory" value={memPct ?? 0} max={100} color="var(--cyan)" display={`${stats.memoryUsedMb ?? 0} MB / ${server.memoryLimitMb} MB`} />
             </div>
             {stats.error && <div className="card-b thin"><span className="badge red">{stats.error}</span></div>}
           </div>
+
+          {/* Details */}
           <div className="card">
             <div className="card-h">Details</div>
             <div className="card-b">
@@ -57,18 +85,26 @@ export function OverviewTab({ server }: { server: Server }) {
           </div>
         </div>
         <div>
+          {/* Allocations */}
           <div className="card mb-4">
             <div className="card-h">Allocations</div>
             <div className="card-b">
-              {server.allocations.length === 0 ? <div className="text-3 sm">No allocations</div> : (
+              {server.allocations.length === 0 ? (
+                <div className="text-3 sm">No allocations configured</div>
+              ) : (
                 <div className="grid gap-2" style={{ gridTemplateColumns: 'repeat(auto-fill, minmax(140px,1fr))' }}>
                   {server.allocations.map((a) => (
-                    <div key={a.id} className="alloc"><span className="mono">{a.port}</span><span className="xs text-3">{a.proto}</span></div>
+                    <div key={a.id} className="alloc">
+                      <span className="mono">{(a as any).alias || (a as any).ip || ''}{(a as any).alias || (a as any).ip ? ':':''}{a.port}</span>
+                      <span className="xs text-3">{a.proto}</span>
+                    </div>
                   ))}
                 </div>
               )}
             </div>
           </div>
+
+          {/* Limits */}
           <div className="card">
             <div className="card-h">Limits</div>
             <div className="card-b">
@@ -83,18 +119,22 @@ export function OverviewTab({ server }: { server: Server }) {
   )
 }
 
-function StatBlock({ icon, label, value, sub, tone }: { icon: any; label: string; value: string; sub: string; tone: string }) {
+function PStatBlock({ icon, label, value, sub, iconCls, barColor, barPct }: {
+  icon: any; label: string; value: string; sub: string; iconCls: string; barColor: string; barPct: number
+}) {
   return (
-    <div className="card stat-card">
-      <div className="stat" style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>
-        <div>
-          <div className="label">{label}</div>
-          <div className="value" style={{ marginTop: 4 }}>{value}</div>
-          <div className="xs text-3">{sub}</div>
-        </div>
-        <Icon name={icon} size={26} />
+    <div className="stat-block">
+      <div className={`sb-icon ${iconCls}`}>
+        <Icon name={icon} size={20} />
       </div>
-      <div className="stat-bar"><span style={{ background: tone }} /></div>
+      <div className="sb-text">
+        <div className="sb-label">{label}</div>
+        <div className="sb-value">{value}</div>
+        <div className="sb-sub">{sub}</div>
+      </div>
+      {barPct > 0 && (
+        <div className="sb-bar"><span style={{ width: `${Math.min(100, barPct)}%`, background: barColor }} /></div>
+      )}
     </div>
   )
 }
@@ -118,17 +158,17 @@ function InfoRow({ k, v }: { k: string; v: any }) {
 
 function ProvisionView({ progress }: { progress: Progress | null }) {
   const pct = progress?.pct ?? 0
-  const stage = progress?.stage || 'Provisioning…'
+  const stage = progress?.stage || 'Provisioning...'
   return (
     <div className="card">
       <div className="card-b" style={{ padding: 48, display: 'grid', placeItems: 'center', gap: 18 }}>
         <Spinner size={34} />
         <div className="center" style={{ gap: 8 }}>
           <div className="bold" style={{ fontSize: 17 }}>{stage}</div>
-          <div className="text-3 sm">Pulling container image and configuring resources…</div>
+          <div className="text-3 sm">Pulling container image and configuring resources...</div>
         </div>
         <div className="bar" style={{ width: 'min(360px, 80%)', height: 10 }}>
-          <div style={{ width: `${pct}%`, background: 'var(--accent)' }} />
+          <div style={{ width: `${pct}%`, background: 'var(--cyan)' }} />
         </div>
         <span className="mono sm text-3">{pct}%</span>
       </div>

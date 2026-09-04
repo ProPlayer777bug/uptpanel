@@ -1,4 +1,4 @@
-import { useEffect, useState, type ReactNode } from 'react'
+import { useEffect, useState, type ReactNode, type ButtonHTMLAttributes } from 'react'
 import { createPortal } from 'react-dom'
 
 /* ---------- Spinner ---------- */
@@ -83,6 +83,29 @@ const I = {
   image: <><rect x="3" y="4" width="18" height="16" rx="2" /><circle cx="9" cy="10" r="2" /><path d="m6 20 5-5 3 3 4-4 3 3" /></>,
   layers: <><path d="m12 3 9 5-9 5-9-5 9-5Z" /><path d="m3 12 9 5 9-5" /><path d="m3 17 9 5 9-5" /></>,
   refresh: <><path d="M3 12a9 9 0 1 0 3-6.7" /><path d="M3 4v5h5" /><path d="M21 12a9 9 0 0 0-3 6.7" /></>,
+  copy: <><rect x="9" y="9" width="12" height="12" rx="2" /><path d="M5 15V5a2 2 0 0 1 2-2h10" /></>,
+  sun: <><circle cx="12" cy="12" r="4" /><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4" /></>,
+  moon: <path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8Z" />,
+  database: <><ellipse cx="12" cy="5" rx="9" ry="3" /><path d="M3 5v14c0 1.7 4 3 9 3s9-1.3 9-3V5" /><path d="M3 12c0 1.7 4 3 9 3s9-1.3 9-3" /></>,
+  webhook: <><circle cx="6" cy="6" r="3" /><circle cx="18" cy="10" r="3" /><circle cx="9" cy="18" r="3" /><path d="M12 8 9 15" /></>,
+  key: <><circle cx="7.5" cy="15.5" r="3.5" /><path d="M10.2 12.8 21 2M15 7l3 3M17 5l3 3" /></>,
+  shieldCheck: <><path d="M12 3 5 6v5c0 4.5 3 8.5 7 10 4-1.5 7-5.5 7-10V6l-7-3Z" /><path d="m9 12 2 2 4-4" /></>,
+  warning: <><path d="M12 3 2 20h20L12 3Z" /><path d="M12 10v4M12 17h.01" /></>,
+  user: <><circle cx="12" cy="8" r="4" /><path d="M4 21c0-4 3.5-6 8-6s8 2 8 6" /></>,
+  help: <><circle cx="12" cy="12" r="9" /><path d="M9.5 9a2.5 2.5 0 1 1 3.8 2.2c-.8.5-1.3 1-1.3 1.8v.5M12 17h.01" /></>,
+  collapse: <><path d="m8 11 4-4 4 4M8 17l4-4 4 4" /></>,
+  expand: <><rect x="3" y="3" width="18" height="18" rx="2" /><path d="M3 9h6V3M21 15h-6v6" /></>,
+  dots: <><circle cx="5" cy="12" r="1.4" /><circle cx="12" cy="12" r="1.4" /><circle cx="19" cy="12" r="1.4" /></>,
+  star: <path d="M12 3 5 12h5l-1 9 3-7 7-7h-5l3-4Z" />,
+  upload: <><path d="M12 16V4m0 0 4 4m-4-4-4 4" /><path d="M4 16v3a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-3" /></>,
+  request: <><path d="M2 12h5l2-3 4 6 2-3h7" /><path d="M2 8h20" /><path d="M2 16h20" /></>,
+  filter: <path d="M3 5h18l-7 8v6l-4 2v-8L3 5Z" />,
+  alert: <><path d="M3 12a9 9 0 1 0 3-6.7" /><path d="M3 4v5h5" /></>,
+  check: <path d="m5 13 4 4 10-10" />,
+  x: <path d="M6 6l12 12M18 6 6 18" />,
+  phone: <path d="M5 3h4l2 5-2.5 1.5a13 13 0 0 0 6 6L17 13l5 2v4a2 2 0 0 1-2 2A16 16 0 0 1 3 5a2 2 0 0 1 2-2Z" />,
+  google: <><path fill="#4285F4" stroke="none" d="M22 12.2c0-.7-.1-1.4-.2-2H12v3.9h5.6a4.5 4.5 0 0 1-2 3v2.5h3.2c1.9-1.7 3.2-4.3 3.2-7.4Z" /><path fill="#34A853" stroke="none" d="M12 22c2.7 0 5-.9 6.6-2.4l-3.2-2.5c-.9.6-2 1-3.4 1-2.6 0-4.8-1.8-5.6-4.1H3.1v2.6A10 10 0 0 0 12 22Z" /><path fill="#FBBC05" stroke="none" d="M6.4 14a6 6 0 0 1 0-3.9V7.5H3.1a10 10 0 0 0 0 9l3.3-2.5Z" /><path fill="#EA4335" stroke="none" d="M12 6c1.5 0 2.8.5 3.8 1.5l2.9-2.9A10 10 0 0 0 3.1 7.5l3.3 2.6C7.2 7.8 9.4 6 12 6Z" /></>,
+  github: <><path fill="currentColor" stroke="none" d="M12 2a10 10 0 0 0-3.2 19.5c.5.1.7-.2.7-.5v-1.7c-2.8.6-3.4-1.2-3.4-1.2-.5-1.2-1.1-1.5-1.1-1.5-.9-.6.1-.6.1-.6 1 .1 1.5 1 1.5 1 .9 1.5 2.4 1.1 3 .8.1-.7.4-1.1.6-1.4-2.2-.3-4.6-1.1-4.6-5a3.9 3.9 0 0 1 1-2.7 3.6 3.6 0 0 1 .1-2.7s.9-.3 2.8 1a9.6 9.6 0 0 1 5 0c1.9-1.3 2.8-1 2.8-1 .4 1 .2 1.9.1 2.7a3.9 3.9 0 0 1 1 2.7c0 3.9-2.4 4.7-4.6 5 .4.3.7.9.7 1.9v2.8c0 .3.2.6.7.5A10 10 0 0 0 12 2Z" /></>,
 }
 
 export function Icon({ name, size = 16, className }: { name: keyof typeof I; size?: number; className?: string }) {
@@ -158,6 +181,189 @@ export function ToastHost() {
     <div className="toast-host">
       {toasts.map((t) => (
         <div key={t.id} className={`toast ${t.kind}`}>{t.msg}</div>
+      ))}
+    </div>
+  )
+}
+
+/* ============================================================
+   Design-system primitives (P2)
+   Reusable building blocks added here so new pages and the shell
+   share one implementation instead of bespoke markup.
+   ============================================================ */
+
+type IconName = keyof typeof I
+
+/* ---------- Button ---------- */
+export function Button({
+  variant = 'default', size = 'md', icon, loading = false,
+  children, className = '', ...rest
+}: ButtonHTMLAttributes<HTMLButtonElement> & {
+  variant?: 'default' | 'primary' | 'subtle' | 'danger' | 'ghost'
+  size?: 'sm' | 'md' | 'lg' | 'icon' | 'xs'
+  icon?: IconName
+  loading?: boolean
+}) {
+  const cls = ['btn', variant, size, loading ? 'disabled' : '', className].join(' ').trim()
+  return (
+    <button className={cls} disabled={loading} {...rest}>
+      {loading ? <Spinner size={14} /> : icon ? <Icon name={icon} size={15} /> : null}
+      {children}
+    </button>
+  )
+}
+
+/* ---------- Tooltip (CSS-only, aria-labelled) ---------- */
+export function Tooltip({ tip, children, side = 'top' }: { tip: string; children: ReactNode; side?: 'top' | 'bottom' | 'left' | 'right' }) {
+  return (
+    <span className={`tooltip-wrap ${side}`} tabIndex={0} aria-label={tip} data-tip={tip}>
+      {children}
+    </span>
+  )
+}
+
+/* ---------- Skeleton ---------- */
+export function Skeleton({ w = '100%', h = 14, r = 4, className = '' }: { w?: number | string; h?: number; r?: number; className?: string }) {
+  return <span className={`skeleton ${className}`} style={{ width: w, height: h, borderRadius: r }} />
+}
+
+/* ---------- ErrorState ---------- */
+export function ErrorState({ title = 'Something went wrong', detail, code, reason, hint, onRetry }: {
+  title?: string; detail?: string; code?: string; reason?: string; hint?: string; onRetry?: () => void
+}) {
+  return (
+    <div className="error-state">
+      <div className="e-ico err"><Icon name="warning" size={26} /></div>
+      <h3>{title}</h3>
+      {reason && <p className="err-reason">{reason}</p>}
+      {hint && <p className="err-hint">{hint}</p>}
+      {code && <code className="err-code">{code}</code>}
+      <div className="mt-3 flex items-center gap-2">
+        {onRetry && <Button variant="subtle" icon="restart" onClick={onRetry}>Retry</Button>}
+        {detail && <Button variant="ghost" onClick={() => alert(detail)}>View details</Button>}
+      </div>
+    </div>
+  )
+}
+
+/* ---------- Progress (determinate / indeterminate) ---------- */
+export function Progress({ value, tone = 'accent', indeterminate = false, className = '' }: {
+  value?: number; tone?: 'accent' | 'success' | 'danger' | 'warning'; indeterminate?: boolean; className?: string
+}) {
+  return (
+    <div className={`bar ${indeterminate ? 'bar-indet' : ''} ${className}`} role="progressbar" aria-valuenow={indeterminate ? undefined : value}>
+      <div className={`bar-fill ${tone}`} style={indeterminate ? {} : { width: `${Math.max(0, Math.min(100, value || 0))}%` }} />
+    </div>
+  )
+}
+
+/* ---------- Switch ---------- */
+export function Switch({ checked, onChange, label, disabled = false }: {
+  checked: boolean; onChange: (v: boolean) => void; label?: string; disabled?: boolean
+}) {
+  return (
+    <label className={`switch ${disabled ? 'disabled' : ''}`}>
+      <input type="checkbox" checked={checked} disabled={disabled} onChange={(e) => onChange(e.target.checked)} />
+      <span className="switch-track" aria-hidden="true"><span className="switch-thumb" /></span>
+      {label && <span className="switch-label">{label}</span>}
+    </label>
+  )
+}
+
+/* ---------- Menu / Dropdown ---------- */
+export function Menu({ trigger, items, align = 'right' }: {
+  trigger: ReactNode
+  items: { label: string; icon?: IconName; danger?: boolean; onClick: () => void; hint?: string }[]
+  align?: 'left' | 'right'
+}) {
+  const [open, setOpen] = useState(false)
+  useEffect(() => {
+    if (!open) return
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setOpen(false) }
+    const onDoc = () => setOpen(false)
+    window.addEventListener('keydown', onKey)
+    window.addEventListener('click', onDoc)
+    return () => { window.removeEventListener('keydown', onKey); window.removeEventListener('click', onDoc) }
+  }, [open])
+  return (
+    <div className="menu" onClick={(e) => e.stopPropagation()}>
+      <span onClick={() => setOpen((o) => !o)}>{trigger}</span>
+      {open && (
+        <div className={`menu-drop ${align}`} role="menu">
+          {items.map((it, i) => (
+            <button key={i} role="menuitem" className={`menu-item ${it.danger ? 'danger' : ''}`}
+              onClick={() => { setOpen(false); it.onClick() }}>
+              {it.icon && <Icon name={it.icon} size={14} />}
+              <span>{it.label}</span>
+              {it.hint && <em className="menu-hint">{it.hint}</em>}
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
+/* ---------- Breadcrumbs ---------- */
+export function Breadcrumbs({ items }: { items: { label: string; to?: string; onClick?: () => void }[] }) {
+  return (
+    <nav className="crumbs" aria-label="Breadcrumb">
+      {items.map((c, i) => (
+        <span key={i} className="crumb" aria-current={i === items.length - 1 ? 'page' : undefined}>
+          {c.to ? <a href={c.to}>{c.label}</a> : c.onClick ? <a onClick={c.onClick}>{c.label}</a> : <span>{c.label}</span>}
+          {i < items.length - 1 && <span className="crumb-sep">/</span>}
+        </span>
+      ))}
+    </nav>
+  )
+}
+
+/* ---------- ConfirmDialog ---------- */
+export function ConfirmDialog({ open, onClose, onConfirm, title, message, confirmLabel = 'Confirm', danger = false, requireType = false, busy = false }: {
+  open: boolean; onClose: () => void; onConfirm: () => void; title: string; message: ReactNode
+  confirmLabel?: string; danger?: boolean; requireType?: boolean; busy?: boolean
+}) {
+  const [typed, setTyped] = useState('')
+  useEffect(() => { if (!open) setTyped('') }, [open])
+  const disabled = busy || (requireType && typed !== title)
+  const confirmBtn = (
+    <Button variant={danger ? 'danger' : 'primary'} icon={danger ? 'trash' : 'check'} loading={busy} disabled={disabled} onClick={onConfirm}>
+      {confirmLabel}
+    </Button>
+  )
+  return (
+    <Modal open={open} onClose={onClose} title={title}>
+      <div className="confirm-body">{message}</div>
+      {requireType && (
+        <div className="field mt-3">
+          <label className="form-label">Type <code className="mono">{title}</code> to confirm</label>
+          <input className="input" value={typed} onChange={(e) => setTyped(e.target.value)} placeholder={title} />
+        </div>
+      )}
+      <div className="actions flex items-center justify-between mt-4">
+        <div />
+        <div className="flex gap-2">
+          <Button variant="ghost" onClick={onClose}>Cancel</Button>
+          {confirmBtn}
+        </div>
+      </div>
+    </Modal>
+  )
+}
+
+/* ---------- Tabs ---------- */
+export function Tabs<T extends string>({ tabs, value, onChange }: {
+  tabs: { id: T; label: string; icon?: IconName; admin?: boolean }[]
+  value: T; onChange: (t: T) => void
+}) {
+  return (
+    <div className="tabs" role="tablist">
+      {tabs.map((t) => (
+        <button key={t.id} role="tab" aria-selected={t.id === value}
+          className={`tab ${t.id === value ? 'active' : ''}`} onClick={() => onChange(t.id)}>
+          {t.icon && <span className="ico"><Icon name={t.icon} size={14} /></span>}
+          {t.label}
+        </button>
       ))}
     </div>
   )

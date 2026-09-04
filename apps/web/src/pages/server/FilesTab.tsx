@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from 'react'
 import { api } from '../../api/client'
-import { Icon, Spinner, toast } from '../../components/ui'
+import { Icon, Spinner, toast, ConfirmDialog } from '../../components/ui'
 import type { Server } from '@uptimehost/types'
 
 interface FEntry { name: string; path: string; isDir: boolean; size?: number }
@@ -11,6 +11,8 @@ export function FilesTab({ server }: { server: Server }) {
   const [loading, setLoading] = useState(true)
   const [err, setErr] = useState('')
   const [openFile, setOpenFile] = useState<FEntry | null>(null)
+  const [newName, setNewName] = useState('')
+  const [creating, setCreating] = useState(false)
 
   const load = useCallback(async (path: string) => {
     setLoading(true); setErr('')
@@ -26,6 +28,17 @@ export function FilesTab({ server }: { server: Server }) {
   }, [server.id])
 
   useEffect(() => { load(cwd) }, [cwd, load])
+
+  const createFile = async () => {
+    const name = newName.trim()
+    if (!name) return
+    const path = cwd === '/' ? `/${name}` : `${cwd}/${name}`
+    try {
+      await api.post(`/servers/${server.id}/files/write`, { path, content: '' })
+      toast.ok(`Created ${name}`)
+      setNewName(''); setCreating(false); load(cwd)
+    } catch (e: any) { toast.err(e?.message || 'Failed to create file') }
+  }
 
   const crumbs = cwd.split('/').filter(Boolean)
 
@@ -43,8 +56,17 @@ export function FilesTab({ server }: { server: Server }) {
             </span>
           ))}
         </div>
+        <button className="btn sm ghost" onClick={() => setCreating((v) => !v)}><Icon name="plus" size={13} /> New</button>
         <button className="btn sm" onClick={() => load(cwd)}><Icon name="restart" size={13} /> Refresh</button>
       </div>
+
+      {creating && (
+        <div className="flex gap-2 items-center" style={{ padding: '8px 14px', borderBottom: '1px solid var(--border)' }}>
+          <input className="input sm mono flex-1" placeholder="file.txt" value={newName} autoFocus onChange={(e) => setNewName(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && createFile()} />
+          <button className="btn primary sm" onClick={createFile} disabled={!newName.trim()}>Create</button>
+          <button className="btn sm ghost" onClick={() => setCreating(false)}>Cancel</button>
+        </div>
+      )}
 
       {openFile && <FileEditor server={server} path={openFile.path} onClose={() => setOpenFile(null)} onSaved={() => load(cwd)} />}
 
@@ -70,27 +92,43 @@ export function FilesTab({ server }: { server: Server }) {
   )
 }
 
+type SaveState = 'saved' | 'dirty' | 'saving' | 'error'
+
 function FileEditor({ server, path, onClose, onSaved }: { server: Server; path: string; onClose: () => void; onSaved: () => void }) {
   const [content, setContent] = useState('')
   const [loading, setLoading] = useState(true)
-  const [saving, setSaving] = useState(false)
+  const [saveState, setSaveState] = useState<SaveState>('saved')
+  const [confirmClose, setConfirmClose] = useState(false)
 
   useEffect(() => {
     setLoading(true)
     api.get(`/servers/${server.id}/files/content?path=${encodeURIComponent(path)}`)
-      .then((d) => setContent(d.content ?? ''))
+      .then((d) => { setContent(d.content ?? ''); setSaveState('saved') })
       .catch((e: any) => toast.err(e?.message || 'Failed to read file'))
       .finally(() => setLoading(false))
   }, [server.id, path])
 
+  useEffect(() => {
+    if (saveState === 'dirty') {
+      const f = (e: BeforeUnloadEvent) => { e.preventDefault(); e.returnValue = '' }
+      window.addEventListener('beforeunload', f)
+      return () => window.removeEventListener('beforeunload', f)
+    }
+  }, [saveState])
+
   const save = async () => {
-    setSaving(true)
+    setSaveState('saving')
     try {
       await api.post(`/servers/${server.id}/files/write`, { path, content })
+      setSaveState('saved')
       toast.ok(`Saved ${path}`)
-      onSaved(); onClose()
-    } catch (e: any) { toast.err(e?.message || 'Failed to write file') }
-    finally { setSaving(false) }
+      onSaved()
+    } catch (e: any) { setSaveState('error'); toast.err(e?.message || 'Failed to write file') }
+  }
+
+  const requestClose = () => {
+    if (saveState === 'dirty') setConfirmClose(true)
+    else onClose()
   }
 
   return (
@@ -98,17 +136,32 @@ function FileEditor({ server, path, onClose, onSaved }: { server: Server; path: 
       <div className="flex items-center gap-2" style={{ padding: '10px 14px', borderBottom: '1px solid var(--line)' }}>
         <Icon name="file" size={14} />
         <span className="mono sm">{path}</span>
+        <span className={`xs ${saveState === 'error' ? '' : 'text-3'}`} style={{ color: saveState === 'error' ? 'var(--danger)' : saveState === 'saving' ? 'var(--warn)' : saveState === 'dirty' ? 'var(--warn)' : undefined }}>
+          {saveState === 'saved' ? 'Saved' : saveState === 'saving' ? 'Saving…' : saveState === 'dirty' ? 'Unsaved' : 'Save failed'}
+        </span>
         <div style={{ flex: 1 }} />
-        <button className="btn sm ghost" onClick={onClose}>Close</button>
-        <button className="btn sm primary" onClick={save} disabled={saving}>{saving ? 'Saving…' : 'Save'}</button>
+        <button className="btn sm ghost" onClick={requestClose}>Close</button>
+        <button className="btn sm primary" onClick={save} disabled={saveState === 'saving' || saveState === 'saved'}>{saveState === 'saving' ? 'Saving…' : 'Save'}</button>
       </div>
       {loading ? <div className="center" style={{ padding: 40 }}><Spinner size={20} /></div> : (
         <textarea
           className="input"
-          style={{ width: '100%', minHeight: 320, fontFamily: 'var(--font-mono)', fontSize: 12.5, borderRadius: 0, border: 'none', background: 'var(--code-bg)', color: '#d7e0ef' }}
-          value={content} onChange={(e) => setContent(e.target.value)} spellCheck={false}
+          aria-label={`Editor for ${path}`}
+          style={{ width: '100%', minHeight: 420, fontFamily: 'var(--font-mono)', fontSize: 12.5, borderRadius: 0, border: 'none', background: 'var(--code-bg)', color: 'var(--text)', lineHeight: 1.7 }}
+          spellCheck={false}
+          value={content}
+          onChange={(e) => { setContent(e.target.value); setSaveState((s) => (s === 'saved' ? 'dirty' : s)) }}
         />
       )}
+      <ConfirmDialog
+        open={confirmClose}
+        title="Discard changes?"
+        message={`You have unsaved changes in ${path}. Save before closing?`}
+        confirmLabel="Discard"
+        danger
+        onClose={() => setConfirmClose(false)}
+        onConfirm={() => { setConfirmClose(false); onClose() }}
+      />
     </div>
   )
 }

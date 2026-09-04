@@ -18,7 +18,7 @@ export function NetworkTab({ server }: { server: Server }) {
             <tbody>
               {allocs.map((a: any) => (
                 <tr key={a.id}>
-                  <td className="mono sm">0.0.0.0</td>
+                  <td className="mono sm">{a.alias || a.ip || '0.0.0.0'}</td>
                   <td className="mono sm">{a.port}</td>
                   <td><span className="badge gray xs">{a.proto || 'tcp'}</span></td>
                   <td><span className="badge green xs">Allocated</span></td>
