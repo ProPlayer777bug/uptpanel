@@ -674,7 +674,16 @@ def install_panel():
     # Phase 1 — never leave the well-known seed credentials in place.
     # ------------------------------------------------------------------
     auto_cred = os.environ.get("UH_ADMIN_AUTO", "").strip().lower() in ("1", "auto", "yes", "true")
-    cred_mode = "auto" if auto_cred else ("env" if os.environ.get("UH_ADMIN_PASSWORD", "").strip() else "prompt")
+    has_pw = bool(os.environ.get("UH_ADMIN_PASSWORD", "").strip())
+    no_tty = not sys.stdin.isatty()
+    if auto_cred:
+        cred_mode = "auto"
+    elif has_pw:
+        cred_mode = "env"
+    elif no_tty:
+        cred_mode = "auto"  # piped (non-TTY) install -> generate a fresh random password
+    else:
+        cred_mode = "prompt"
     admin_email, applied_pw, already_configured = rotate_default_admin(API_URL, cred_mode)
 
     # ------------------------------------------------------------------
