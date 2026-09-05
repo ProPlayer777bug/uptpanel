@@ -585,53 +585,41 @@ def _generate_strong_password(length=20):
     return "".join(secrets.choice(alphabet) for _ in range(length))
 
 
-def rotate_default_admin(api_url, mode):
-    """Log into the fresh panel with the seed credentials and rotate the owner
-    admin password to a fresh secret.
+def rotate_default_admin(api_url, admin_password):
+    """Finish the owner account bootstrap against the freshly seeded API.
+
+    The API seeds the owner from UH_ADMIN_PASSWORD (env passed at first boot),
+    so by the time we call this the owner password is already the fresh secret
+    chosen below. We log in with it to prove the account works, then only adjust
+    the email if the operator asked for a different address.
 
     Returns (email, new_password_or_None, already_configured):
         email              the owner's (possibly updated) login email
         new_password       the password that was actually applied, or None
-        already_configured True when the seed password no longer worked (i.e.
-                           this is a reinstall and the admin has already been
-                           rotated), in which case no new value was set.
+        already_configured True when the login no longer works (i.e. this is a
+                           reinstall and the admin was already rotated), in
+                           which case no changes were made.
 
-    The value is printed once and never written to disk.
-
-    mode: 'auto'  -> generate a random password  (recommended, default)
-          'env'   -> use UH_ADMIN_PASSWORD if set
-          ''      -> TTY prompt (interactive)
+    The value is printed once and never written to disk. No static fallback
+    credential exists anywhere in this path.
     """
     seed_email = "admin@uptime.host"
-    seed_pass = "admin123"
     email = (os.environ.get("UH_ADMIN_EMAIL", "").strip() or seed_email)
 
-    # 1. Determine the desired password (auto / env / prompt).
-    new_pw = os.environ.get("UH_ADMIN_PASSWORD", "").strip()
-    if not new_pw and mode == "auto":
-        new_pw = _generate_strong_password()
-    if not new_pw and sys.stdin.isatty():
-        while True:
-            new_pw = getpass.getpass("Set a NEW admin password (min 6 chars): ")
-            if len(new_pw) >= 6:
-                break
-            warn("too short — need 6+ characters")
+    if not admin_password:
+        warn("no admin password available (set UH_ADMIN_PASSWORD or UH_ADMIN_AUTO=auto)")
+        return email, None, True
 
-    # 2. Log in with the seed account.
-    code, res = http_json(f"{api_url}/api/auth/login", {"email": seed_email, "password": seed_pass})
+    # 2. Log in with the credential supplied at first boot (no hardcoded seeds).
+    code, res = http_json(f"{api_url}/api/auth/login", {"email": email, "password": admin_password})
     if code != 200 or not res.get("token"):
-        # The seed password no longer works — this is (almost always) a reinstall
+        # The seeded credential is gone — this is (almost always) a reinstall
         # where the admin was already rotated. Do NOT invent/rotate a password.
         warn("seed login failed — the admin password was already rotated; keeping it")
         return email, None, True
     token = res["token"]
 
-    # 3. Find the owner user and update its email + password.
-    if not new_pw and not email:
-        die("seed login worked but no new password was provided (set UH_ADMIN_PASSWORD or UH_ADMIN_AUTO=auto)", 2)
-    if not new_pw:
-        die("could not determine an admin password — set UH_ADMIN_PASSWORD, or use mode=auto (UH_ADMIN_AUTO=auto)", 2)
-
+    # 3. Find the owner user and update its email if one was requested.
     code2, list_res = http_json(f"{api_url}/api/users", token=token)
     uid = None
     if code2 == 200 and list_res.get("users"):
@@ -642,21 +630,23 @@ def rotate_default_admin(api_url, mode):
         if not uid and list_res["users"]:
             uid = list_res["users"][0].get("id")
     if not uid:
-        warn("could not locate the owner user to rotate its password")
+        warn("could not locate the owner user to configure its email")
         return email, None, False
 
-    patch = {"password": new_pw}
+    patch = {}
     # Only change the email if the operator asked for a different one (and it is
     # a different address than the seed).
     if email and email.lower() != seed_email:
         patch["email"] = email
-    code3, _ = http_json(f"{api_url}/api/users/{uid}", patch, token=token, method="PATCH")
-    if code3 in (200, 201):
-        info("Seed admin credential rotated to a fresh secret.")
+    if patch:
+        code3, _ = http_json(f"{api_url}/api/users/{uid}", patch, token=token, method="PATCH")
+        if code3 in (200, 201):
+            info("Owner admin email updated.")
+        else:
+            warn(f"email update reported unexpected status {code3}")
     else:
-        warn(f"password rotation reported unexpected status {code3}")
-        return email, None, False
-    return email, new_pw, False
+        info("Seed admin credential is already the fresh secret.")
+    return email, admin_password, False
 
 
 def build_panel_url(mode, domain=None, ip=None):
@@ -688,12 +678,43 @@ def install_panel():
         warn(f"tsx not found at {tsx}; is the API dependency installed?")
         return False
 
+    # ------------------------------------------------------------------
+    # Phase 0 — decide the owner credential BEFORE the API's first boot, so the
+    # seeder can create the account with the fresh secret directly (via env).
+    # This keeps the automated install fully unattended and removes any static
+    # default credential from the whole bootstrap path.
+    # ------------------------------------------------------------------
+    auto_cred = os.environ.get("UH_ADMIN_AUTO", "").strip().lower() in ("1", "auto", "yes", "true")
+    env_pw = os.environ.get("UH_ADMIN_PASSWORD", "").strip()
+    no_tty = not tty_active()
+    if auto_cred:
+        admin_password = _generate_strong_password()
+    elif env_pw:
+        admin_password = env_pw
+    elif no_tty:
+        admin_password = _generate_strong_password()  # unattended -> fresh random
+    else:
+        while True:
+            admin_password = getpass.getpass("Set the admin password (min 6 chars): ")
+            if len(admin_password) >= 6:
+                break
+            warn("too short — need 6+ characters")
+    admin_email = os.environ.get("UH_ADMIN_EMAIL", "").strip() or "admin@uptime.host"
+
+    api_env = {"UH_API_PORT": API_PORT}
+    if admin_password:
+        api_env["UH_ADMIN_PASSWORD"] = admin_password
+    if os.environ.get("UH_ADMIN_EMAIL"):
+        api_env["UH_ADMIN_EMAIL"] = admin_email
+    if os.environ.get("UH_ADMIN_NAME"):
+        api_env["UH_ADMIN_NAME"] = os.environ["UH_ADMIN_NAME"].strip()
+
     # Start API
     start_daemon(
         "panel-api",
         [tsx, os.path.join(REPO_DIR, "apps", "api", "src", "index.ts")],
         cwd=REPO_DIR,
-        env={"UH_API_PORT": API_PORT},
+        env=api_env,
     )
     # Start web dev server (proxies /api to the API)
     start_daemon(
@@ -713,20 +734,9 @@ def install_panel():
         info("API is up and answering /api/health.")
 
     # ------------------------------------------------------------------
-    # Phase 1 — never leave the well-known seed credentials in place.
+    # Phase 1 — verify + finish the owner bootstrap (no static seed remains).
     # ------------------------------------------------------------------
-    auto_cred = os.environ.get("UH_ADMIN_AUTO", "").strip().lower() in ("1", "auto", "yes", "true")
-    has_pw = bool(os.environ.get("UH_ADMIN_PASSWORD", "").strip())
-    no_tty = not tty_active()
-    if auto_cred:
-        cred_mode = "auto"
-    elif has_pw:
-        cred_mode = "env"
-    elif no_tty:
-        cred_mode = "auto"  # no terminal at all -> generate a fresh random password
-    else:
-        cred_mode = "prompt"
-    admin_email, applied_pw, already_configured = rotate_default_admin(API_URL, cred_mode)
+    admin_email, applied_pw, already_configured = rotate_default_admin(API_URL, admin_password)
 
     # ------------------------------------------------------------------
     # Phase 2 — gather public exposure facts up front.

@@ -4,6 +4,7 @@ import { useServers, useNodes, useActivity } from '../api/hooks'
 import { Icon, StatePill, Button, EmptyState, Skeleton } from '../components/ui'
 import { SparkChart } from '../components/Chart'
 import { Shell } from '../components/Shell'
+import { maskAddress } from '../utils/mask'
 
 function barPct(v: number) { return Math.min(100, Math.max(0, v)) }
 
@@ -206,7 +207,7 @@ function uptime(startedAt: number | null | undefined): string {
 function ServerRow({ server, onNavigate }: { server: any; onNavigate: () => void }) {
   const memPct = server.memoryLimitMb ? barPct((server.memoryMb / server.memoryLimitMb) * 100) : 0
   const host = server.node?.name || '—'
-  const ipPort = server.allocations?.[0] ? `${host}:${server.allocations[0].port}` : host
+  const ipPort = server.allocations?.[0] ? maskAddress(`${host}:${server.allocations[0].port}`) : host
 
   return (
     <div className="row-item" onClick={onNavigate} style={{ alignItems: 'center' }}>

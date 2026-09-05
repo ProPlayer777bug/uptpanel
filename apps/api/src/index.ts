@@ -92,21 +92,67 @@ for (const node of store.db.nodes) {
   store.persist()
 }
 
-const hub = new WsHub()
+const hub = new WsHub((user, topic) => {
+  if (!user) return false
+  if (topic.startsWith('srv:')) {
+    const sid = topic.slice(4)
+    const s = store.db.servers.find((x) => x.id === sid)
+    return !!s && serverAccess(user, s, store).ok
+  }
+  return true
+})
 
-await app.register(cors, { origin: true })
-await app.register(rateLimit, { max: 600, timeWindow: '1 minute' })
+await app.register(cors, { origin: ['https://panel.uptimehost.in', 'https://gp.uptimehost.in', 'https://panel.gp.uptimehost.in', 'https://gp1.uptimehost.in'], methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE'] })
+await app.register(rateLimit, {
+  max: 600,
+  timeWindow: '1 minute',
+  // Key on the edge-verified client IP (set by Cloudflare, forwarded by nginx)
+  // so an attacker cannot rotate X-Forwarded-For to dodge the limit. Fall back
+  // to the socket identity when the header is absent.
+  keyGenerator: (req: any) => String((req.headers as any)['cf-connecting-ip'] || req.ip),
+})
 await app.register(websocket)
 
 // ---------------------------------------------------------------------------
 // Auth
 // ---------------------------------------------------------------------------
+// In-memory brute-force guards, keyed by normalized email, in addition to the
+// IP rate limit. Tracks failed attempts and cooldown windows on the box itself
+// (not spoofable via X-Forwarded-For).
+const loginFails = new Map<string, { fails: number; lockedUntil: number }>()
+const LOGIN_MAX_FAILS = 10
+const LOGIN_LOCK_SEC = 5 * 60 * 1000
+// A fixed scrypt-format hash used only to equalize login timing for
+// nonexistent accounts (never assigned to a real user).
+const DUMMY_PW_HASH = '0'.repeat(32) + ':' + '0'.repeat(128)
+
 app.post('/api/auth/login', async (req, reply) => {
   const { email, password } = (req.body || {}) as any
-  const user = store.db.users.find((u) => u.email === email)
-  if (!user || !verifyPw(password, user.passwordHash)) {
+  const normEmail = String(email || '').trim().toLowerCase()
+
+  // Per-account lockout after repeated failures (independent of IP header).
+  const state = loginFails.get(normEmail)
+  if (state && state.lockedUntil > Date.now()) {
+    return reply.code(429).send({ ok: false, error: 'TOO_MANY_ATTEMPTS' })
+  }
+
+  const user = store.db.users.find((u) => u.email.toLowerCase() === normEmail)
+
+  // Timing equalization: run a scrypt verify even when the account does not
+  // exist, so response time does not reveal which addresses are registered.
+  const ok = user ? verifyPw(password, user.passwordHash) : verifyPw(password, DUMMY_PW_HASH)
+  if (!user || !ok) {
+    const next = { fails: (state?.fails || 0) + 1, lockedUntil: 0 }
+    if (next.fails >= LOGIN_MAX_FAILS) next.lockedUntil = Date.now() + LOGIN_LOCK_SEC
+    loginFails.set(normEmail, next)
+    if (loginFails.size > 10000) {
+      const oldest = loginFails.keys().next().value
+      if (oldest) loginFails.delete(oldest)
+    }
     return reply.code(401).send({ ok: false, error: 'Invalid credentials' })
   }
+
+  loginFails.delete(normEmail)
   const token = createSession(store, user.id)
   activity(user, 'auth', 'info', `${user.name} signed in`)
   return { ok: true, token, user: publicUser(user) }
@@ -153,6 +199,34 @@ app.get('/api/auth/me', async (req) => {
   const user = me(req)
   if (!user) return { ok: false, error: 'UNAUTHENTICATED' }
   return { ok: true, user: publicUser(user) }
+})
+
+// Self-service password change. Validates the current password, updates the
+// hash, and revokes every other session so a leaked token cannot outlive the
+// rotation. Only accounts with a password can call this.
+app.post('/api/auth/change-password', async (req, reply) => {
+  const user = me(req)
+  if (!user) return reply.code(401).send({ ok: false, error: 'UNAUTHENTICATED' })
+  const { currentPassword, newPassword } = (req.body || {}) as any
+  const target = store.db.users.find((u) => u.id === user.id)
+  if (!target || !target.passwordHash) {
+    return reply.code(400).send({ ok: false, error: 'NO_PASSWORD', detail: 'This account uses OTP/OAuth and has no password.' })
+  }
+  if (!currentPassword || !verifyPw(String(currentPassword), target.passwordHash)) {
+    return reply.code(401).send({ ok: false, error: 'INVALID_CURRENT_PASSWORD' })
+  }
+  if (!newPassword || String(newPassword).length < 8) {
+    return reply.code(400).send({ ok: false, error: 'WEAK_PASSWORD', detail: 'New password must be at least 8 characters.' })
+  }
+  target.passwordHash = hashPw(String(newPassword))
+  store.persist()
+  // Revoke all other sessions for this account.
+  const presented = req.headers.authorization?.replace(/^Bearer\s+/i, '') || ''
+  store.db.sessions = store.db.sessions.filter((s) => s.userId !== user.id || s.token === presented)
+  store.persist()
+  audit(store, user.name, 'CHANGE_PASSWORD', `user:${user.email}`)
+  activity(user, 'auth', 'info', `${user.name} changed password`)
+  return { ok: true }
 })
 
 // ---------------------------------------------------------------------------
@@ -262,8 +336,11 @@ app.get('/api/auth/oauth/:provider', async (req, reply) => {
     return reply.redirect(`${baseUrl}/oauth/callback/${provider}?error=${encodeURIComponent('OAUTH_NO_EMAIL')}`)
   }
 
-  // find-or-create the account bound to this provider + email
-  const byProvider = store.db.users.find((u) => u[`${provider}Id`])
+  // find-or-create the account bound to this provider + email. The provider id
+  // must match THIS identity — a bare predicate would resolve every provider
+  // login to the first user who ever used that provider (identity confusion).
+  const providerId = `${provider}:${info.email}`
+  const byProvider = store.db.users.find((u) => u[`${provider}Id`] === providerId)
   const byEmail = store.db.users.find((u) => u.email?.toLowerCase() === info.email)
   let user = byProvider || byEmail
   if (!user) {
@@ -308,7 +385,8 @@ app.post('/api/auth/oauth/:provider/callback', async (req, reply) => {
   if (!info.email) return reply.code(400).send({ ok: false, error: 'OAUTH_NO_EMAIL' })
 
   const byEmail = store.db.users.find((u) => u.email?.toLowerCase() === info.email)
-  const byProvider = store.db.users.find((u) => u[`${provider}Id`])
+  const providerId = `${provider}:${info.email}`
+  const byProvider = store.db.users.find((u) => u[`${provider}Id`] === providerId)
   let user = byProvider || byEmail
   if (!user) {
     user = {
@@ -428,6 +506,13 @@ app.patch('/api/users/:id', async (req, reply) => {
   const ROLES = ['viewer', 'developer', 'operator', 'admin', 'owner']
   const isSelf = actor.id === id
 
+  // Only the owner may alter admin/owner accounts at all. Otherwise an admin
+  // could send { email, password } (without role) and overwrite the owner's
+  // credentials, taking over the whole panel.
+  if ((u.role === 'admin' || u.role === 'owner') && actor.role !== 'owner') {
+    return reply.code(403).send({ ok: false, error: 'OWNER_ONLY', detail: 'Only the owner can modify admin accounts.' })
+  }
+
   if (role !== undefined) {
     if (!ROLES.includes(role)) return reply.code(400).send({ ok: false, error: 'INVALID_ROLE' })
     // Never allow stripping the last admin/owner (including yourself).
@@ -530,7 +615,7 @@ function meFromToken(store: any, token: string) {
   return requireAuth({ headers: { authorization: `Bearer ${token}` } } as any, store)
 }
 function publicUser(u: any) {
-  const { passwordHash, ...rest } = u
+  const { passwordHash, phone, googleId, githubId, ...rest } = u
   return rest
 }
 function activity(user: any, kind: string, severity: string, message: string, extra: any = {}) {
@@ -680,6 +765,30 @@ function parsePort(url: string | undefined): number | null {
   return m ? Number(m[2]) : null
 }
 
+// Hostnames the agent may advertise/use: strict FQDN/IP charset, no whitespace,
+// no shell metacharacters, and no loopback/private/link-local addresses (which
+// would let an enrolled agent point the panel at internal tooling instead).
+function validAgentHost(h: string): boolean {
+  if (typeof h !== 'string' || !h.length || h.length > 255) return false
+  if (!/^[A-Za-z0-9._:-]+$/.test(h)) return false
+  if (/^(127\.|10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.|0\.|169\.254\.|100\.(6[4-9]|[7-9]\d|1[01]\d|12[0-7])\.|fe80:|::1|fd[0-9a-f]:|fc[0-9a-f]:|fec0:)/i.test(h)) return false
+  return true
+}
+
+// Panel-side guard for file-manager paths before they are forwarded to the
+// node agent: blocks traversal (..), NUL bytes, backslashes (which can confuse
+// the agent's path handling), empty targets and absurd lengths. The agent
+// remains the final authority on the filesystem, this is defense in depth.
+function validPanelPath(p: any): boolean {
+  if (typeof p !== 'string' || !p.trim() || p.length > 4096) return false
+  if (p.includes('\0') || p.includes('\\')) return false
+  if (p.split('/').some((seg) => seg === '..')) return false
+  return true
+}
+
+const MAX_UPLOAD_BYTES = 200 * 1024 * 1024
+const MAX_WRITE_BYTES = 1024 * 1024
+
 function buildAgentUrl(node: any): string {
   if (node.agentUrl) {
     try {
@@ -787,7 +896,7 @@ function buildInstallCommand(node: any): string {
 app.get('/api/session/context', async (req) => {
   const user = me(req)
   if (!user) return { ok: false, error: 'UNAUTHENTICATED' }
-  const nodes = store.db.nodes.map(withHealth)
+  const nodes = store.db.nodes.map(withHealth).map((n) => (isGlobalAdmin(user) ? n : publicNode(n)))
   return {
     ok: true,
     user: publicUser(user),
@@ -849,6 +958,10 @@ app.post('/api/nodes', async (req, reply) => {
   if (!user) return reply.code(401).send({ ok: false, error: 'UNAUTHENTICATED' })
   if (!can(user, 'admin')) return reply.code(403).send({ ok: false, error: 'FORBIDDEN' })
   const { name, locationId, scheme, host, port, agentUrl, agentToken, memoryMb, diskGb, overcommit, portRangeStart, portRangeEnd } = (req.body || {}) as any
+  const finalHost = host || parseHost(agentUrl) || ''
+  if (!validAgentHost(finalHost)) {
+    return reply.code(400).send({ ok: false, error: 'INVALID_HOST', detail: 'Host must be a public FQDN/IP. Loopback and private addresses are not allowed.' })
+  }
   const node: any = {
     id: nanoid(10),
     name: name || 'New Node',
@@ -856,7 +969,7 @@ app.post('/api/nodes', async (req, reply) => {
     // FQDN connection: protocol (http/https) + host + port. If a legacy raw
     // agentUrl is supplied, parse out scheme/host/port for backward compat.
     scheme: normalizeScheme(scheme, agentUrl),
-    host: host || parseHost(agentUrl) || '',
+    host: finalHost,
     port: port != null ? Number(port) : parsePort(agentUrl) || 7373,
     agentUrl: agentUrl || '',
     agentToken: agentToken || generateNodeToken(),
@@ -915,8 +1028,13 @@ app.post('/api/nodes/auto/install', async (req, reply) => {
   const { host, port, username, password, name, memoryMb, diskGb, overcommit, locationId } = (req.body || {}) as any
   if (!host || !username || !password) return reply.code(400).send({ ok: false, error: 'SSH_CREDS_REQUIRED' })
   const creds = { host: String(host).trim(), port: Number(port || 22), username: String(username).trim(), password: String(password) }
-  const panel = (process.env.UH_PANEL_URL || '').replace(/\/$/, '')
-  if (!panel) return reply.code(500).send({ ok: false, error: 'UH_PANEL_URL_NOT_SET' })
+  
+  // Derive panel URL from request if env var not set
+  const proto = req.headers['x-forwarded-proto'] || req.protocol || 'http'
+  const hostHeader = req.headers['x-forwarded-host'] || req.headers.host || ''
+  const panel = (process.env.UH_PANEL_URL || `${proto}://${hostHeader}`).replace(/\/$/, '')
+  
+  if (!panel || panel === 'http://' || panel === 'https://') return reply.code(500).send({ ok: false, error: 'UH_PANEL_URL_NOT_SET' })
 
   // Advertised host the panel should use to reach the agent = the IP the admin
   // typed. The agent listens on plain HTTP; the panel already tolerates self-
@@ -993,8 +1111,17 @@ app.patch('/api/nodes/:id', async (req, reply) => {
   if (string(b.name) !== undefined) node.name = string(b.name)
   if (string(b.description) !== undefined) node.description = string(b.description)
   if (string(b.locationId) !== undefined) node.locationId = b.locationId
-  if (string(b.fqdn) !== undefined) node.host = string(b.fqdn)
-  if (int(b.port) !== undefined) node.port = int(b.port)
+  if (string(b.fqdn) !== undefined) {
+    if (!validAgentHost(string(b.fqdn)!)) {
+      return reply.code(400).send({ ok: false, error: 'INVALID_HOST', detail: 'Host must be a public FQDN/IP. Loopback and private addresses are not allowed.' })
+    }
+    node.host = string(b.fqdn)
+  }
+  if (int(b.port) !== undefined) {
+    const p = int(b.port)!
+    if (!Number.isInteger(p) || p < 1 || p > 65535) return reply.code(400).send({ ok: false, error: 'INVALID_PORT' })
+    node.port = p
+  }
   if (string(b.timezone) !== undefined) node.timezone = string(b.timezone)
 
   if (bool(b.overcommit) !== undefined) node.overcommit = bool(b.overcommit)
@@ -1213,10 +1340,29 @@ app.post('/api/nodes/register', async (req, reply) => {
     return reply.code(403).send({ ok: false, error: 'INVALID_REGISTRATION_TOKEN' })
   }
   // Adopt the endpoint the agent advertises so the panel can reach it back.
-  if (scheme) node.scheme = normalizeScheme(scheme, undefined)
-  if (host) node.host = host
-  if (port) node.port = Number(port)
-  node.agentUrl = buildAgentUrl(node)
+  // Endpoint fields are honored only until the node's FIRST successful
+  // heartbeat. After enrollment the panel endpoint is locked: dropping them
+  // here stops an enrolled agent (or anyone holding a leaked token) from
+  // re-pointing the panel at an arbitrary URL (SSRF). Operators move nodes via
+  // the admin PATCH route instead.
+  const firstEnroll = !node.lastSeen
+  if (firstEnroll) {
+    if (scheme) node.scheme = normalizeScheme(scheme, undefined)
+    if (host) {
+      if (!validAgentHost(String(host))) {
+        return reply.code(400).send({ ok: false, error: 'INVALID_HOST' })
+      }
+      node.host = host
+    }
+    if (port !== undefined && port !== null && port !== '') {
+      const p = Number(port)
+      if (!Number.isInteger(p) || p < 1 || p > 65535) {
+        return reply.code(400).send({ ok: false, error: 'INVALID_PORT' })
+      }
+      node.port = p
+    }
+    node.agentUrl = buildAgentUrl(node)
+  }
   // Record heartbeat liveness + live host resources reported by the agent.
   node.lastSeen = Date.now()
   node.agentVersion = body.agentVersion ?? node.agentVersion
@@ -1363,6 +1509,14 @@ function withHealth(node: any) {
     remainingMemoryMb: Math.max(0, (node.memoryMb || 0) - memUsed),
     remainingDiskGb: Math.max(0, (node.diskGb || 0) - diskUsed),
   }
+}
+
+// Node shape safe for non-admin consumers. The agent bearer token, registration
+// token and install command are control-plane credentials — they must never be
+// sent to viewers or self-registered users.
+function publicNode(node: any) {
+  const { agentToken, registrationToken, installCommand, agentUrl, ...rest } = node
+  return rest
 }
 
 // ---------------------------------------------------------------------------
@@ -1943,30 +2097,40 @@ app.get('/api/servers/:id/logs', async (req) => {
 // ---------------------------------------------------------------------------
 // Files (forwarded to the node agent)
 // ---------------------------------------------------------------------------
-app.get('/api/servers/:id/files', async (req) => {
+app.get('/api/servers/:id/files', async (req, reply) => {
   const user = me(req)
-  if (!user) return { ok: false, error: 'UNAUTHENTICATED' }
+  if (!user) return reply.code(401).send({ ok: false, error: 'UNAUTHENTICATED' })
   const { id } = req.params as any
   const found = findServer(user, id)
-  if ('error' in found) return { ok: false, error: found.error }
+  if ('error' in found) return reply.code(found.status).send({ ok: false, error: found.error })
   const server = found.server
+  const acc = serverAccess(user, server, store)
+  if (!acc.permissions.files) return reply.code(403).send({ ok: false, error: 'FORBIDDEN' })
   const client = agentFor(store.db.nodes.find((n) => n.id === server.nodeId))
-  if (!client) return { ok: false, error: 'NODE_UNREACHABLE' }
+  if (!client) return reply.code(409).send({ ok: false, error: 'NODE_UNREACHABLE' })
   const path = (req.query as any)?.path || '/'
-  return await client.listFiles(server.id, path)
+  if (!validPanelPath(path)) return reply.code(400).send({ ok: false, error: 'INVALID_PATH' })
+  const res = await client.listFiles(server.id, path)
+  if ((res as any)?.error) return reply.code(400).send(res)
+  return res
 })
 
-app.get('/api/servers/:id/files/content', async (req) => {
+app.get('/api/servers/:id/files/content', async (req, reply) => {
   const user = me(req)
-  if (!user) return { ok: false, error: 'UNAUTHENTICATED' }
+  if (!user) return reply.code(401).send({ ok: false, error: 'UNAUTHENTICATED' })
   const { id } = req.params as any
   const found = findServer(user, id)
-  if ('error' in found) return { ok: false, error: found.error }
+  if ('error' in found) return reply.code(found.status).send({ ok: false, error: found.error })
   const server = found.server
+  const acc = serverAccess(user, server, store)
+  if (!acc.permissions.files) return reply.code(403).send({ ok: false, error: 'FORBIDDEN' })
   const client = agentFor(store.db.nodes.find((n) => n.id === server.nodeId))
-  if (!client) return { ok: false, error: 'NODE_UNREACHABLE' }
+  if (!client) return reply.code(409).send({ ok: false, error: 'NODE_UNREACHABLE' })
   const path = (req.query as any)?.path || '/'
-  return await client.readFile(server.id, path)
+  if (!validPanelPath(path)) return reply.code(400).send({ ok: false, error: 'INVALID_PATH' })
+  const res = await client.readFile(server.id, path)
+  if ((res as any)?.error) return reply.code(400).send(res)
+  return res
 })
 
 app.post('/api/servers/:id/files/write', async (req, reply) => {
@@ -1981,6 +2145,8 @@ app.post('/api/servers/:id/files/write', async (req, reply) => {
   const client = agentFor(store.db.nodes.find((n) => n.id === server.nodeId))
   if (!client) return reply.code(409).send({ ok: false, error: 'NODE_UNREACHABLE' })
   const { path, content } = (req.body || {}) as any
+  if (!validPanelPath(path)) return reply.code(400).send({ ok: false, error: 'INVALID_PATH' })
+  if (typeof content === 'string' && content.length > MAX_WRITE_BYTES) return reply.code(400).send({ ok: false, error: 'FILE_TOO_LARGE' })
   const res = await client.writeFile(server.id, path, content)
   audit(store, user.name, 'EDIT_FILE', `file:${path}`)
   return res
@@ -1999,7 +2165,7 @@ app.post('/api/servers/:id/files/delete', async (req, reply) => {
   const client = agentFor(store.db.nodes.find((n) => n.id === server.nodeId))
   if (!client) return reply.code(409).send({ ok: false, error: 'NODE_UNREACHABLE' })
   const { path } = (req.body || {}) as any
-  if (!path) return reply.code(400).send({ ok: false, error: 'PATH_REQUIRED' })
+  if (!validPanelPath(path)) return reply.code(400).send({ ok: false, error: 'INVALID_PATH' })
   const res = await client.deleteFile(server.id, path)
   audit(store, user.name, 'DELETE_FILE', `file:${path}`)
   return res
@@ -2018,7 +2184,7 @@ app.post('/api/servers/:id/files/rename', async (req, reply) => {
   const client = agentFor(store.db.nodes.find((n) => n.id === server.nodeId))
   if (!client) return reply.code(409).send({ ok: false, error: 'NODE_UNREACHABLE' })
   const { from, to } = (req.body || {}) as any
-  if (!from || !to) return reply.code(400).send({ ok: false, error: 'FROM_TO_REQUIRED' })
+  if (!validPanelPath(from) || !validPanelPath(to)) return reply.code(400).send({ ok: false, error: 'INVALID_PATH' })
   const res = await client.renameFile(server.id, from, to)
   audit(store, user.name, 'RENAME_FILE', `file:${from}->${to}`)
   return res
@@ -2037,7 +2203,7 @@ app.post('/api/servers/:id/files/mkdir', async (req, reply) => {
   const client = agentFor(store.db.nodes.find((n) => n.id === server.nodeId))
   if (!client) return reply.code(409).send({ ok: false, error: 'NODE_UNREACHABLE' })
   const { path } = (req.body || {}) as any
-  if (!path) return reply.code(400).send({ ok: false, error: 'PATH_REQUIRED' })
+  if (!validPanelPath(path)) return reply.code(400).send({ ok: false, error: 'INVALID_PATH' })
   const res = await client.makeDir(server.id, path)
   audit(store, user.name, 'MKDIR', `dir:${path}`)
   return res
@@ -2056,7 +2222,7 @@ app.post('/api/servers/:id/files/archive', async (req, reply) => {
   const client = agentFor(store.db.nodes.find((n) => n.id === server.nodeId))
   if (!client) return reply.code(409).send({ ok: false, error: 'NODE_UNREACHABLE' })
   const { path } = (req.body || {}) as any
-  if (!path) return reply.code(400).send({ ok: false, error: 'PATH_REQUIRED' })
+  if (!validPanelPath(path)) return reply.code(400).send({ ok: false, error: 'INVALID_PATH' })
   const res = await client.archive(server.id, path)
   audit(store, user.name, 'ARCHIVE', `file:${path}`)
   return res
@@ -2075,7 +2241,7 @@ app.post('/api/servers/:id/files/archive/extract', async (req, reply) => {
   const client = agentFor(store.db.nodes.find((n) => n.id === server.nodeId))
   if (!client) return reply.code(409).send({ ok: false, error: 'NODE_UNREACHABLE' })
   const { path } = (req.body || {}) as any
-  if (!path) return reply.code(400).send({ ok: false, error: 'PATH_REQUIRED' })
+  if (!validPanelPath(path)) return reply.code(400).send({ ok: false, error: 'INVALID_PATH' })
   const res = await client.extractArchive(server.id, path)
   audit(store, user.name, 'EXTRACT_ARCHIVE', `file:${path}`)
   return res
@@ -2094,6 +2260,10 @@ app.post('/api/servers/:id/files/upload', async (req, reply) => {
   const client = agentFor(store.db.nodes.find((n) => n.id === server.nodeId))
   if (!client) return reply.code(409).send({ ok: false, error: 'NODE_UNREACHABLE' })
   const path = (req.query as any)?.path || '/'
+  if (!validPanelPath(path)) return reply.code(400).send({ ok: false, error: 'INVALID_PATH' })
+  if (Number(req.headers['content-length'] || 0) > MAX_UPLOAD_BYTES) {
+    return reply.code(413).send({ ok: false, error: 'UPLOAD_TOO_LARGE' })
+  }
   // raw multipart proxy: pass the incoming body stream through to the agent
   const url = `${client.baseUrl}/api/servers/${server.id}/files/upload?path=${encodeURIComponent(path)}`
   const up = await client.fetchTls(url, {
@@ -2127,7 +2297,7 @@ app.get('/api/servers/:id/files/download', async (req, reply) => {
   const client = agentFor(store.db.nodes.find((n) => n.id === server.nodeId))
   if (!client) return reply.code(409).send({ ok: false, error: 'NODE_UNREACHABLE' })
   const path = (req.query as any)?.path || ''
-  if (!path) return reply.code(400).send({ ok: false, error: 'PATH_REQUIRED' })
+  if (!validPanelPath(path)) return reply.code(400).send({ ok: false, error: 'INVALID_PATH' })
   const up = await client.downloadFileBytes(server.id, path)
   if (!up.ok) return reply.code(up.status).send({ ok: false, error: 'FILE_UNAVAILABLE' })
   const buf = Buffer.from(await up.arrayBuffer())
@@ -2689,9 +2859,13 @@ function withDbHost(d: any) {
   return { ...d, host: d.host || dbHostFor(server) }
 }
 function randomPassword(len: number): string {
-  const chars = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789'
+  // CSPRNG characters (no lookalike/ambiguous characters) — pull uniformly from
+  // a randomBytes pool instead of Math.random() so output is cryptographically
+  // unpredictable.
+  const alphabet = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789'
+  const bytes = randomBytes(len)
   let out = ''
-  for (let i = 0; i < len; i++) out += chars[Math.floor(Math.random() * chars.length)]
+  for (let i = 0; i < len; i++) out += alphabet[bytes[i] % alphabet.length]
   return out
 }
 function fmtBytes(n: number): string {
@@ -2846,7 +3020,20 @@ function pushTerminal(serverId: string, text: string, level: 'plain' | 'info' | 
   ring.push(line)
   if (ring.length > 500) ring.splice(0, ring.length - 500)
   hub.to(`srv:${serverId}`, { type: 'terminal-line', data: line })
-  store.persist()
+  // Defer the disk write: rapid bursts (e.g. long install/progress streams) are
+  // coalesced so we never fsync the whole DB per line.
+  terminalPersist.schedule()
+}
+
+const terminalPersist = {
+  timer: null as ReturnType<typeof setTimeout> | null,
+  schedule() {
+    if (this.timer) return
+    this.timer = setTimeout(() => {
+      this.timer = null
+      try { store.persist() } catch { /* write failure is surfaced on next route */ }
+    }, 1500)
+  },
 }
 
 // ---------------------------------------------------------------------------
@@ -2863,7 +3050,7 @@ app.get('/api/servers/:id/access', async (req, reply) => {
   // The full list holds emails/permissions of every collaborator; expose it only
   // to those who can manage access (global admins, owners, or 'access' delegants).
   const canManage = isGlobalAdmin(user) || acc.permissions.access
-  return { ok: true, owner: user, access: canManage ? store.db.access.filter((a) => a.serverId === id) : [] }
+  return { ok: true, owner: publicUser(user), access: canManage ? store.db.access.filter((a) => a.serverId === id) : [] }
 })
 
 app.post('/api/servers/:id/access', async (req, reply) => {
@@ -2913,7 +3100,10 @@ app.get('/api/servers/:id/api-keys', async (req, reply) => {
     return reply.code(403).send({ ok: false, error: 'FORBIDDEN' })
   }
   const keys = store.db.apiKeys.filter((k) => k.scope === 'server' && k.serverId === id)
-  return { ok: true, keys: keys.map((k) => ({ token: undefined, ...k, masked: k.token.slice(0, 6) + '…' + k.token.slice(-4) })) }
+  return { ok: true, keys: keys.map((k) => {
+    const { token, ...rest } = k
+    return { ...rest, masked: token.slice(0, 6) + '…' + token.slice(-4) }
+  }) }
 })
 
 app.post('/api/servers/:id/api-keys', async (req, reply) => {
@@ -3055,7 +3245,9 @@ function summarize(user?: any) {
 app.register(async (app) => {
   app.get('/ws', { websocket: true }, (socket, req) => {
     const queryToken = ((req as any).query && (req as any).query.token) as string | undefined
-    const client = hub.add(socket, queryToken ? meFromToken(store, queryToken) : null)
+    const user = queryToken ? meFromToken(store, queryToken) : me(req)
+    if (!user) { socket.close(4001, 'unauthorized'); return }
+    const client = hub.add(socket, user)
     socket.on('message', (raw: Buffer) => {
       try {
         const msg = JSON.parse(String(raw))
@@ -3181,10 +3373,12 @@ setInterval(async () => {
 app.setErrorHandler((err, req, reply) => {
   const id = nanoid(8)
   console.error(`UH-${id}`, (err as any).code, (err as Error).message)
-  reply.status(500).send({ ok: false, code: `UH-${id}`, error: (err as any).code || 'INTERNAL', message: (err as Error).message })
+  // Never echo raw error messages (SQL/db details, file paths, provider errors)
+  // back to clients — return only the correlation id.
+  reply.status(500).send({ ok: false, code: `UH-${id}`, error: 'INTERNAL' })
 })
 
-app.listen({ port: PORT, host: '0.0.0.0' }).then(async (addr) => {
+app.listen({ port: PORT, host: '127.0.0.1' }).then(async (addr) => {
   console.log(`[UptimeHost] Control Core listening on ${addr}`)
   console.log(`[UptimeHost] REST API → http://localhost:${PORT}/api`)
   console.log(`[UptimeHost] WS → ws://localhost:${PORT}/ws`)

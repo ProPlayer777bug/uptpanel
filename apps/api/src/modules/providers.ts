@@ -11,9 +11,31 @@
 // Whenever a provider has no credentials configured, the login UI renders it
 // as "not configured" and the backend refuses to send the code / start OAuth.
 
-import { createHash, randomInt, randomBytes } from 'node:crypto'
+import { createHash, randomInt, randomBytes, timingSafeEqual } from 'node:crypto'
 import { nanoid } from 'nanoid'
 import type { Store } from '../store/store.js'
+
+// ---------------------------------------------------------------------------
+// OTP bounce guards (per-target), independent of the IP rate limiter.
+// ---------------------------------------------------------------------------
+const otpSendLog = new Map<string, number[]>()
+const OTP_SEND_MIN_INTERVAL = 30 * 1000
+const OTP_SEND_MAX_PER_HOUR = 5
+
+function otpSendAllowed(target: string): boolean {
+  const now = Date.now()
+  const hits = (otpSendLog.get(target) || []).filter((t) => now - t < 3600 * 1000)
+  if (hits.length >= OTP_SEND_MAX_PER_HOUR) return false
+  const last = hits[hits.length - 1]
+  if (last && now - last < OTP_SEND_MIN_INTERVAL) return false
+  hits.push(now)
+  otpSendLog.set(target, hits)
+  if (otpSendLog.size > 10000) {
+    const oldestKey = otpSendLog.keys().next().value
+    if (oldestKey) otpSendLog.delete(oldestKey)
+  }
+  return true
+}
 
 // ---------------------------------------------------------------------------
 // Settings helpers
@@ -109,14 +131,17 @@ export function generateOtpCode() {
 }
 
 // issue stores a hashed code bound to an identifier (email or phone) so the raw
-// code is never persisted.
+// code is never persisted. Only ONE active code exists per target — issuing a
+// new one invalidates the previous so attackers cannot accumulate codes (and
+// therefore guess budgets) by spamming the send endpoint.
 export function issueOtp(store: Store, target: string, channel: 'email' | 'sms') {
   const code = generateOtpCode()
   const ttl = (getAuthSettings(store).otpTtlSec || 300) * 1000
   const h = hashCode(code)
-  // prune expired
-  store.db.otp = store.db.otp.filter((o) => o.expiresAt > Date.now())
-  store.db.otp.push({ id: nanoid(10), target: target.toLowerCase(), channel, hash: h, createdAt: Date.now(), expiresAt: Date.now() + ttl, attempts: 0 })
+  const t = target.toLowerCase()
+  // prune expired + invalidate any prior code for this target
+  store.db.otp = store.db.otp.filter((o) => o.expiresAt > Date.now() && o.target !== t)
+  store.db.otp.push({ id: nanoid(10), target: t, channel, hash: h, createdAt: Date.now(), expiresAt: Date.now() + ttl, attempts: 0 })
   store.persist()
   return code
 }
@@ -127,7 +152,7 @@ export function verifyOtp(store: Store, target: string, code: string) {
   if (!rec) return false
   if (rec.attempts >= 5) { store.db.otp = store.db.otp.filter((o) => o.id !== rec.id); store.persist(); return false }
   rec.attempts += 1
-  const ok = createHash('sha256').update(String(code).trim()).digest('hex') === rec.hash
+  const ok = safeEqual(createHash('sha256').update(String(code).trim()).digest(), Buffer.from(rec.hash, 'hex'))
   if (ok) store.db.otp = store.db.otp.filter((o) => o.id !== rec.id)
   store.persist()
   return ok
@@ -135,6 +160,11 @@ export function verifyOtp(store: Store, target: string, code: string) {
 
 function hashCode(code: string) {
   return createHash('sha256').update(String(code).trim()).digest('hex')
+}
+
+function safeEqual(a: Buffer, b: Buffer) {
+  if (a.length !== b.length) return false
+  return timingSafeEqual(a, b)
 }
 
 // ---------------------------------------------------------------------------
@@ -308,21 +338,23 @@ async function githubExchange(cfg: NonNullable<AuthSettings['github']>, code: st
 // ---------------------------------------------------------------------------
 export async function sendOtp(store: Store, target: string, channel: 'email' | 'sms'): Promise<{ ok: boolean; error?: string }> {
   const a = getAuthSettings(store)
+  const t = target.toLowerCase()
+  if (!otpSendAllowed(t)) return { ok: false, error: 'OTP_RATE_LIMITED' }
   let code = ''
   try {
     if (channel === 'email') {
       if (!a.smtp?.host || !a.smtp?.user) return { ok: false, error: 'EMAIL_OTP_NOT_CONFIGURED' }
-      code = issueOtp(store, target, 'email')
+      code = issueOtp(store, t, 'email')
       await smtpSend(a.smtp, target, 'Your UptimeHost verification code', `Your verification code is: ${code}\n\nIt expires in ${(a.otpTtlSec || 300) / 60} minutes.`)
     } else {
       if (!a.sms?.from && !(a.sms?.provider === 'webhook')) return { ok: false, error: 'SMS_OTP_NOT_CONFIGURED' }
-      code = issueOtp(store, target, 'sms')
+      code = issueOtp(store, t, 'sms')
       await sendSms(a.sms, target, `Your UptimeHost verification code is: ${code}`)
     }
     return { ok: true }
   } catch (e: any) {
     // roll back the issued code on delivery failure so it can't be brute-forced later
-    store.db.otp = store.db.otp.filter((o) => o.channel !== channel || !target.toLowerCase().includes(o.target))
+    store.db.otp = store.db.otp.filter((o) => o.channel !== channel || !t.includes(o.target))
     store.persist()
     return { ok: false, error: e?.message || 'DELIVERY_FAILED' }
   }

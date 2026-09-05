@@ -17,6 +17,8 @@ const STEPS: { key: Step; label: string }[] = [
   { key: 'users', label: 'Users' },
 ]
 
+const STEP_MOBILE_WIDTH = 280
+
 export function CreateServer({ onClose }: { onClose: () => void }) {
   const { nodes } = useNodes()
   const { blueprints } = useBlueprints()
@@ -106,7 +108,7 @@ export function CreateServer({ onClose }: { onClose: () => void }) {
   const stepIdx = STEPS.findIndex((s) => s.key === step)
 
   return (
-    <Modal open onClose={onClose} title="Create a server" width={620}>
+    <Modal open onClose={onClose} title="Create a server">
       <div className="wizard-steps mb-3">
         {STEPS.map((s, i) => (
           <div key={s.key} className={`wizard-step ${i < stepIdx ? 'done' : ''} ${i === stepIdx ? 'active' : ''}`}>

@@ -1,6 +1,6 @@
 // In-memory store with JSON-file persistence.
 // In production this adapter is replaced by PostgreSQL + Redis.
-import { mkdirSync, readFileSync, writeFileSync, existsSync } from 'node:fs'
+import { mkdirSync, readFileSync, writeFileSync, existsSync, chmodSync, renameSync } from 'node:fs'
 import { dirname } from 'node:path'
 
 export interface DBShape {
@@ -86,7 +86,12 @@ export class Store {
   persist() {
     try {
       mkdirSync(dirname(FILE), { recursive: true })
-      writeFileSync(FILE, JSON.stringify(this.db, null, 2))
+      const tmp = `${FILE}.tmp`
+      writeFileSync(tmp, JSON.stringify(this.db, null, 2))
+      // The DB holds hashed passwords, tokens and SMTP/OAuth secrets — keep it
+      // owner-only so other local users/processes cannot read it.
+      chmodSync(tmp, 0o600)
+      renameSync(tmp, FILE)
     } catch {
       /* non-fatal */
     }

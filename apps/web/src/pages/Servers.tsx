@@ -5,6 +5,7 @@ import { useApp } from '../state/auth'
 import { Icon, StatePill, Button, EmptyState, Switch, Menu, Spinner, toast, Tooltip } from '../components/ui'
 import { CreateServer } from './CreateServer'
 import { Shell } from '../components/Shell'
+import { maskAddress } from '../utils/mask'
 
 function barPct(v: number) { return Math.min(100, Math.max(0, v)) }
 

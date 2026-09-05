@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import { api } from '../../api/client'
 import { Icon, Spinner, StatePill } from '../../components/ui'
 import { useSocket } from '../../hooks/useSocket'
+import { maskAddress } from '../../utils/mask'
 import type { Server } from '@uptimehost/types'
 
 interface Stats { cpuPercent?: number; memoryUsedMb?: number; memoryLimitMb?: number; memoryPercent?: number; networkRxMb?: number; networkTxMb?: number; pids?: number; state?: string; error?: string }
@@ -95,7 +96,7 @@ export function OverviewTab({ server }: { server: Server }) {
                 <div className="grid gap-2" style={{ gridTemplateColumns: 'repeat(auto-fill, minmax(140px,1fr))' }}>
                   {server.allocations.map((a) => (
                     <div key={a.id} className="alloc">
-                      <span className="mono">{(a as any).alias || (a as any).ip || ''}{(a as any).alias || (a as any).ip ? ':':''}{a.port}</span>
+                      <span className="mono">{maskAddress(`${(a as any).alias || (a as any).ip || ''}:${a.port}`)}</span>
                       <span className="xs text-3">{a.proto}</span>
                     </div>
                   ))}

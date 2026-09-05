@@ -36,11 +36,17 @@ npm install
 npm run dev          # http://localhost:5173
 ```
 
-Open http://localhost:5173 and sign in with the demo account:
+Open http://localhost:5173 and sign in with the owner account. On first start
+the backend creates the owner with a random password that is printed once to
+the API console:
 
 ```
-admin@uptime.host / admin123
+admin@uptime.host / (random — printed once at first boot)
 ```
+
+For unattended installs you can seed a known secret instead via
+`UH_ADMIN_PASSWORD` (and `UH_ADMIN_EMAIL`) before first boot — see `setup.py`.
+No static credentials ever ship in this repository.
 
 The Vite dev server proxies `/api` and `/ws` to the backend, so everything works
 out of the box. Data persists to `apps/api/.uh-data/db.json` (an in-memory +

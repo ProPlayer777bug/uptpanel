@@ -521,6 +521,13 @@ textarea.input { resize: vertical; min-height: 80px; }
 .tab.active .ico { color: var(--cyan-strong); }
 
 /* ============================================================
+   Responsive constants
+   ============================================================ */
+:root {
+  --wizard-mobile-max-width: 280px;
+}
+
+/* ============================================================
    Console / Terminal — Pterodactyl style
    ============================================================ */
 .terminal {
@@ -1599,3 +1606,33 @@ textarea.input { resize: vertical; min-height: 80px; }
   box-shadow: 0 4px 14px var(--gold-line);
 }
 .fm .btn.primary:hover { background: linear-gradient(180deg, var(--gold-bright), var(--gold-strong)); box-shadow: 0 4px 20px var(--gold-line); }
+
+/* ============================================================
+   Mobile-responsive Create Server wizard
+   ============================================================ */
+@media (max-width: 768px) {
+  .wizard-step { padding: 8px 4px; }
+  .wizard-dot { width: 18px; height: 18px; }
+  .wizard-label { font-size: 12px; }
+  
+  .grid.gap-3 > div { flex: 1 1 100%; max-width: 100%; }
+  .field { margin-bottom: 12px; }
+  
+  .select { min-width: 100%; }
+  .input { font-size: 14px; }
+  
+  .badge { font-size: 11px; }
+  
+  .term-inputbar { padding: 8px 8px; }
+  .term-statusbar { padding: 4px 8px; }
+  
+  .console-grid { grid-template-columns: 1fr; }
+  .console-sidebar { grid-column: 1; grid-row: auto; }
+  .console-charts { display: none; }
+}
+
+@media (min-width: 769px) {
+  .wizard-step { padding: 12px 16px; }
+  .wizard-dot { width: 24px; height: 24px; }
+  .wizard-label { font-size: 14px; }
+}

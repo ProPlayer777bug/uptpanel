@@ -1,14 +1,22 @@
 // API client with token auth and typed responses.
+// The session token lives in memory with a sessionStorage fallback — it is
+// cleared on browser close (never localStorage), so a leaked token has a short
+// shelf-life and does not persist across sessions.
 const TOKEN_KEY = 'uh_token'
 
+let currentToken = ''
+
 export function getToken() {
-  return localStorage.getItem(TOKEN_KEY) || ''
+  if (!currentToken && typeof window !== 'undefined') currentToken = sessionStorage.getItem(TOKEN_KEY) || ''
+  return currentToken
 }
 export function setToken(t: string) {
-  localStorage.setItem(TOKEN_KEY, t)
+  currentToken = t
+  if (typeof window !== 'undefined') sessionStorage.setItem(TOKEN_KEY, t)
 }
 export function clearToken() {
-  localStorage.removeItem(TOKEN_KEY)
+  currentToken = ''
+  if (typeof window !== 'undefined') sessionStorage.removeItem(TOKEN_KEY)
 }
 
 async function request<T = any>(path: string, opts: RequestInit = {}): Promise<T> {

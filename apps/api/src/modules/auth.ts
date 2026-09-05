@@ -5,6 +5,7 @@ import { Store } from '../store/store.js'
 import { hashPw, verifyPw } from '../sim/seed.js'
 
 const SESSION_TTL = 7 * 24 * 3600 * 1000
+const MAX_SESSIONS_PER_USER = 10
 
 // API keys: per-server keys start with sk_, account keys with ak_. Tokens are
 // high-entropy and stored in plaintext (they are shown once at creation).
@@ -30,14 +31,17 @@ export function requireAuth(req: FastifyRequest, store: Store) {
     if (!owner) return null
     if (key.permissions?.view === false) return null
     key.lastUsedAt = Date.now()
+    // A server-scoped key (sk_) is confined to ONE server: never inherit the
+    // owner's global role, or it could pass can() checks and act on any server.
+    // Its capabilities come from key.permissions via serverAccess(); role is
+    // only used for global-admin checks and can() gates. Account keys (ak_) act
+    // as their owner.
+    const role = key.scope === 'server' ? 'viewer' : owner.role
     return {
       id: owner.id,
       email: owner.email,
       name: owner.name,
-      // Preserve the owner's real role so global-admin account keys are treated
-      // as admins everywhere (isGlobalAdmin/visibleServers). The key marker
-      // below lets serverAccess enforce per-server vs account scoping.
-      role: owner.role,
+      role,
       avatarHue: owner.avatarHue,
       passwordHash: owner.passwordHash,
       key: { scope: key.scope, serverId: key.serverId, permissions: key.permissions, id: key.id, userId: owner.id },
@@ -47,12 +51,21 @@ export function requireAuth(req: FastifyRequest, store: Store) {
 }
 
 export function createSession(store: Store, userId: string) {
+  const now = Date.now()
+  // Prune expired sessions and cap per-user sessions (rotate the oldest) so the
+  // sessions table cannot grow unboundedly or pile up stale tokens.
+  store.db.sessions = store.db.sessions.filter((s) => s.expiresAt > now)
+  const userSessions = store.db.sessions.filter((s) => s.userId === userId)
+  if (userSessions.length >= MAX_SESSIONS_PER_USER) {
+    const oldest = userSessions.sort((a, b) => a.createdAt - b.createdAt)[0]
+    store.db.sessions = store.db.sessions.filter((s) => s !== oldest)
+  }
   const token = nanoid(40)
   store.db.sessions.push({
     token,
     userId,
-    createdAt: Date.now(),
-    expiresAt: Date.now() + SESSION_TTL,
+    createdAt: now,
+    expiresAt: now + SESSION_TTL,
   })
   store.persist()
   return token

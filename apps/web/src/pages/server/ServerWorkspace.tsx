@@ -16,6 +16,7 @@ import { AccessTab } from './AccessTab'
 import { ApiTab } from './ApiTab'
 import { SettingsTab } from './SettingsTab'
 import { VersionManager, PluginManager, isMcServer } from './VersionPluginModals'
+import { maskAddress } from '../../utils/mask'
 
 type Tab = 'overview' | 'console' | 'files' | 'snapshots' | 'backups' | 'schedules' | 'databases' | 'startup' | 'network' | 'access' | 'api' | 'settings'
 const ADMIN_TABS: Tab[] = ['startup', 'network', 'snapshots', 'access', 'api', 'settings', 'databases', 'schedules', 'backups']
@@ -56,7 +57,7 @@ export function ServerWorkspace() {
   if (!server) return <div className="center" style={{ padding: 80, color: 'var(--text-3)' }}>Server not found</div>
 
   const a0 = server.allocations?.[0]
-  const address = a0 ? `${a0.alias || server.node?.name || a0.ip || '—'}:${a0.port}` : '—'
+  const address = a0 ? maskAddress(`${a0.alias || server.node?.name || a0.ip || '—'}:${a0.port}`) : '—'
 
   const subnav = (
     <Tabs
