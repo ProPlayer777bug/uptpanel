@@ -8,6 +8,32 @@ import { publicAddress } from '../../utils/mask'
 import type { Server } from '@uptimehost/types'
 
 interface Line { id: number; kind: 'out' | 'in' | 'sys'; text: string; ts: number }
+
+// 20 console-only text color + font presets. Colors map to the CSS custom
+// property --term-fg, fonts to --term-font (stacked so they fall back to the
+// browser's default monospace when the named face isn't installed).
+const CONSOLE_THEMES: { id: string; name: string; color: string; font: string }[] = [
+  { id: 'gold', name: 'Gold', color: '#ffd23f', font: `'JetBrains Mono','Fira Code',ui-monospace,'SF Mono',Menlo,monospace` },
+  { id: 'ember', name: 'Ember', color: '#ffb454', font: `'Fira Code','JetBrains Mono',ui-monospace,'Cascadia Code',monospace` },
+  { id: 'green', name: 'Green', color: '#4cff88', font: `'JetBrains Mono','Fira Code',ui-monospace,'SF Mono',Menlo,monospace` },
+  { id: 'ice', name: 'Ice Blue', color: '#8fd8ff', font: `'SF Mono',Menlo,Monaco,Consolas,monospace` },
+  { id: 'candy', name: 'Candy Pink', color: '#ff8ae2', font: `Consolas,'Courier New',Courier,monospace` },
+  { id: 'lime', name: 'Lime', color: '#ccff33', font: `'Ubuntu Mono','DejaVu Sans Mono',Consolas,monospace` },
+  { id: 'paper', name: 'Paper White', color: '#eef2f7', font: `'JetBrains Mono','Fira Code',ui-monospace,'SF Mono',Menlo,monospace` },
+  { id: 'lavender', name: 'Lavender', color: '#c9a9ff', font: `'Roboto Mono','Droid Sans Mono','DejaVu Sans Mono',monospace` },
+  { id: 'neon', name: 'Cyber Neon', color: '#00ffd5', font: `ui-monospace,'Cascadia Code','JetBrains Mono',Menlo,monospace` },
+  { id: 'matrix', name: 'Matrix', color: '#00e05a', font: `Consolas,'Courier New',Courier,monospace` },
+  { id: 'embers', name: 'Ember Orange', color: '#ff8c42', font: `'Ubuntu Mono','DejaVu Sans Mono',Consolas,monospace` },
+  { id: 'crimson', name: 'Crimson', color: '#ff6b6b', font: `'JetBrains Mono','Fira Code',ui-monospace,'SF Mono',Menlo,monospace` },
+  { id: 'teal', name: 'Teal', color: '#2dd4bf', font: `'Fira Code','JetBrains Mono',ui-monospace,'Cascadia Code',monospace` },
+  { id: 'silver', name: 'Silver', color: '#cfd6e3', font: `'DejaVu Sans Mono','Bitstream Vera Sans Mono',Consolas,monospace` },
+  { id: 'violet', name: 'Purple Haze', color: '#b388ff', font: `'Inconsolata','Droid Sans Mono','DejaVu Sans Mono',monospace` },
+  { id: 'ocean', name: 'Ocean', color: '#4dd0e1', font: `'SF Mono',Menlo,Monaco,Consolas,monospace` },
+  { id: 'retro', name: 'Retro', color: '#ffd866', font: `'Courier New',Courier,monospace` },
+  { id: 'cream', name: 'Soft Cream', color: '#f3e8c9', font: `'SF Mono',Menlo,Monaco,Consolas,monospace` },
+  { id: 'solar', name: 'Solarized', color: '#d19a2f', font: `'Ubuntu Mono','DejaVu Sans Mono',Consolas,monospace` },
+  { id: 'nord', name: 'Nord', color: '#88c0d0', font: `ui-monospace,'Cascadia Code','JetBrains Mono',Menlo,monospace` },
+]
 interface ConsoleMsg { type: 'log' | 'input' | 'status' | 'system' | 'eula-required' | 'eula-accepted'; line?: string }
 
 let seq = 0
@@ -95,6 +121,8 @@ export function ConsoleTab({ server }: { server: Server }) {
   const [eulaPending, setEulaPending] = useState(false)
   const [powerBusy, setPowerBusy] = useState(false)
   const [showKillConfirm, setShowKillConfirm] = useState(false)
+  const [termTheme, setTermTheme] = useState(() => localStorage.getItem('uh_console_theme') || 'gold')
+  const [themeOpen, setThemeOpen] = useState(false)
   const { refresh } = useApp()
   const pendingRef = useRef<Line[]>([])
   const wsRef = useRef<WebSocket | null>(null)
@@ -105,6 +133,63 @@ export function ConsoleTab({ server }: { server: Server }) {
   const alive = useRef(true)
   const pausedRef = useRef(paused)
   useEffect(() => { pausedRef.current = paused }, [paused])
+
+  useEffect(() => {
+    if (!themeOpen) return
+    const onDoc = () => setThemeOpen(false)
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setThemeOpen(false) }
+    document.addEventListener('click', onDoc)
+    document.addEventListener('keydown', onKey)
+    return () => { document.removeEventListener('click', onDoc); document.removeEventListener('keydown', onKey) }
+  }, [themeOpen])
+
+  const pickTermTheme = (id: string) => {
+    setTermTheme(id)
+    localStorage.setItem('uh_console_theme', id)
+    setThemeOpen(false)
+  }
+
+  // Console height resizer with lock/unlock. When unlocked a drag handle at
+  // the bottom lets the user set a custom height (persisted). Locked keeps
+  // whatever height was set (or the CSS default) and hides the handle.
+  const [hLocked, setHLocked] = useState(() => localStorage.getItem('uh_console_lock') !== '0')
+  const [customH, setCustomH] = useState<number | null>(() => {
+    const n = Number(localStorage.getItem('uh_console_h') || 0)
+    return n > 240 ? n : null
+  })
+  const winRef = useRef<HTMLDivElement>(null)
+  const resizeRef = useRef<{ startY: number; startH: number } | null>(null)
+
+  const toggleHeightLock = () => {
+    setHLocked((v) => {
+      const next = !v
+      localStorage.setItem('uh_console_lock', next ? '1' : '0')
+      return next
+    })
+  }
+
+  const onResizeStart = (e: React.MouseEvent) => {
+    e.preventDefault()
+    resizeRef.current = { startY: e.clientY, startH: winRef.current?.offsetHeight || 360 }
+    document.body.style.userSelect = 'none'
+    document.body.style.cursor = 'ns-resize'
+    const move = (ev: MouseEvent) => {
+      const r = resizeRef.current
+      if (!r) return
+      const h = Math.max(240, Math.min(window.innerHeight - 120, r.startH + (ev.clientY - r.startY)))
+      setCustomH(h)
+      localStorage.setItem('uh_console_h', String(h))
+    }
+    const up = () => {
+      resizeRef.current = null
+      document.body.style.userSelect = ''
+      document.body.style.cursor = ''
+      document.removeEventListener('mousemove', move)
+      document.removeEventListener('mouseup', up)
+    }
+    document.addEventListener('mousemove', move)
+    document.addEventListener('mouseup', up)
+  }
 
   const runPowerAction = async (action: 'start' | 'stop' | 'restart' | 'kill', fromConfirm = false) => {
     if (action === 'kill' && !fromConfirm) { setShowKillConfirm(true); return }
@@ -183,6 +268,15 @@ export function ConsoleTab({ server }: { server: Server }) {
   }, [loadHistory])
 
   useEffect(() => () => { if (flushTimerRef.current) clearTimeout(flushTimerRef.current) }, [])
+
+  // Forget old console output: every 10 minutes the scrollback is pruned to
+  // only the newest 20 messages so stale logs don't accumulate forever.
+  useEffect(() => {
+    const t = setInterval(() => {
+      setLines((prev) => (prev.length > 20 ? prev.slice(-20) : prev))
+    }, 10 * 60 * 1000)
+    return () => clearInterval(t)
+  }, [])
 
   useEffect(() => { linesRef.current = lines }, [lines])
 
@@ -394,7 +488,7 @@ export function ConsoleTab({ server }: { server: Server }) {
   return (
     <div className="console-grid">
       {/* Terminal window frame (modern dark terminal: traffic lights + title) */}
-      <div className={`term-window ${fullscreen ? 'fs' : ''}`}>
+      <div ref={winRef} className={`term-window ${fullscreen ? 'fs' : ''} ct-${termTheme}`} style={customH ? { height: customH, minHeight: customH, maxHeight: customH } : undefined}>
         <div className="term-titlebar">
           <div className="term-dots">
             <span className="td red" />
@@ -411,10 +505,29 @@ export function ConsoleTab({ server }: { server: Server }) {
               placeholder="Filter…" style={{ width: 150 }} autoFocus
               onChange={(e) => setSearchQ(e.target.value)} onKeyDown={(e) => e.key === 'Escape' && setShowSearch(false)} />
           )}
-          <button className="btn sm ghost icon" onClick={() => { setShowSearch((v) => !v); setSearchQ('') }} title="Search / filter"><Icon name="search" size={13} /></button>
-          <button className="btn sm ghost icon" onClick={() => setTermSize(-1)} title="Decrease font"><Icon name="x" size={11} /></button>
-          <span className="xs text-3 mono" style={{ width: 22, textAlign: 'center' }}>{fontSize}</span>
-          <button className="btn sm ghost icon" onClick={() => setTermSize(1)} title="Increase font"><Icon name="plus" size={11} /></button>
+          <button className="btn ghost icon" onClick={() => { setShowSearch((v) => !v); setSearchQ('') }} title="Search / filter"><Icon name="search" size={16} /></button>
+          <button className="btn ghost icon" onClick={() => setTermSize(-1)} title="Decrease font"><Icon name="x" size={13} /></button>
+          <span className="xs text-3 mono" style={{ width: 26, textAlign: 'center' }}>{fontSize}</span>
+          <button className="btn ghost icon" onClick={() => setTermSize(1)} title="Increase font"><Icon name="plus" size={13} /></button>
+          <button className="btn ghost icon" onClick={toggleHeightLock} title={hLocked ? 'Unlock console height (drag to resize)' : 'Lock console height (fixed)'}>
+            <Icon name={hLocked ? 'unlock' : 'lock'} size={15} />
+          </button>
+          <div style={{ position: 'relative' }} onClick={(e) => e.stopPropagation()}>
+            <button className="btn ghost icon" title="Console theme (text color + font)" onClick={() => setThemeOpen((v) => !v)}>
+              <Icon name="palette" size={16} />
+            </button>
+            {themeOpen && (
+              <div className="ct-theme-menu" role="menu">
+                {CONSOLE_THEMES.map((t) => (
+                  <button key={t.id} className={`ct-theme-item${termTheme === t.id ? ' active' : ''}`} onClick={() => pickTermTheme(t.id)}>
+                    <span className="ct-theme-dot" style={{ background: t.color }} />
+                    <span className="ct-theme-sample" style={{ color: t.color, fontFamily: t.font }}>{t.name}</span>
+                    {termTheme === t.id && <Icon name="check" size={13} />}
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
         </div>
 
         <div className="terminal" ref={boxRef} style={{ fontSize }} onScroll={onTermScroll}>
@@ -457,6 +570,7 @@ export function ConsoleTab({ server }: { server: Server }) {
           <span className="xs text-3">MEM <b className="text-2">{liveStats.memoryUsedMb != null ? `${Math.round(liveStats.memoryUsedMb)}MB` : '—'}</b> <span className="text-3">/ {server.memoryLimitMb}MB</span></span>
           <span className="badge gray mono xs">{server.id}</span>
         </div>
+        {!hLocked && <div className="term-resizer" onMouseDown={onResizeStart} title="Drag to resize console height" />}
       </div>
 
       {/* Sidebar — buttons + stat blocks */}

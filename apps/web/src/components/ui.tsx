@@ -62,6 +62,7 @@ const I = {
   folder: <path d="M3 6a2 2 0 0 1 2-2h4l3 3h7a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V6z" />,
   snap: <><circle cx="12" cy="12" r="3" /><path d="M12 2v4M12 18v4M2 12h4M18 12h4" /></>,
   lock: <><rect x="4" y="10" width="16" height="11" rx="2" /><path d="M8 10V7a4 4 0 0 1 8 0v3" /></>,
+  unlock: <><rect x="4" y="10" width="16" height="11" rx="2" /><path d="M8 11V7a4 4 0 0 1 6.4-3.4" /></>,
   gear: <><circle cx="12" cy="12" r="3" /><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M19.1 4.9 17 7M7 17l-2.1 2.1" /></>,
   chev: <path d="m9 6 6 6-6 6" />,
   chevD: <path d="m6 9 6 6 6-6" />,
