@@ -92,6 +92,23 @@ export function CustomizeBackground() {
     } finally { setLoading(false) }
   }
 
+  const restore = async () => {
+    setLoading(true)
+    setBanner('')
+    try {
+      await api.put('/settings/background', { background: { enabled: false, kind: 'wallpaper', url: '', durationSec: 5 } })
+      setCfg(null)
+      setMode('off')
+      setUrl('')
+      setDurationSec(5)
+      toast.ok('Restored the default panel background')
+      window.dispatchEvent(new Event('uh-bg-changed'))
+    } catch (e: any) {
+      setBanner(e?.message || 'Failed to restore default background')
+      toast.err(e?.message || 'Failed to restore default background')
+    } finally { setLoading(false) }
+  }
+
   if (!loaded) return <div className="center" style={{ padding: 18 }}><Spinner size={18} /></div>
 
   const previewUrl = url
@@ -101,6 +118,11 @@ export function CustomizeBackground() {
         <Icon name="image" size={15} /> Customize background <span className="h-sub">wallpaper or live wallpaper for the whole panel</span>
         {cfg?.enabled && <span className="badge cyan sm" style={{ marginLeft: 8 }}>active</span>}
         <div style={{ flex: 1 }} />
+        {cfg?.enabled && (
+          <button className="btn sm ghost" onClick={restore} disabled={loading} title="Remove the custom background and use the normal panel theme">
+            <Icon name="restart" size={13} /> Restore default
+          </button>
+        )}
         <button className="btn sm primary" onClick={save} disabled={loading}><Icon name="check" size={13} /> Save</button>
       </div>
       <div className="card-b">
