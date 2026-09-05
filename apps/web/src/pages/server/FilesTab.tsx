@@ -268,7 +268,7 @@ export function FilesTab({ server }: { server: Server }) {
       </div>
 
       {creating && (
-        <div className="flex gap-2 items-center fm-create" style={{ padding: '8px 14px', borderBottom: '1px solid var(--border)' }}>
+        <div className="flex gap-2 items-center panel-row fm-create" style={{ padding: '8px 14px', borderBottom: '1px solid var(--border)' }}>
           <input className="input sm mono flex-1" placeholder="name" value={newName} autoFocus onChange={(e) => setNewName(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && createFile()} />
           <button className="btn primary sm" disabled={!newName.trim()} onClick={createFile}>Create file</button>
           <button className="btn sm ghost" disabled={!newName.trim()} onClick={createFolder}>Create folder</button>
@@ -344,7 +344,7 @@ export function FilesTab({ server }: { server: Server }) {
 function RenameDialog({ target, onClose, onConfirm }: { target: FEntry; onClose: () => void; onConfirm: (to: string) => void }) {
   const [value, setValue] = useState(target.name)
   return (
-    <div className="flex gap-2 items-center" style={{ padding: '8px 14px', borderBottom: '1px solid var(--line)' }}>
+    <div className="flex gap-2 panel-row items-center" style={{ padding: '8px 14px', borderBottom: '1px solid var(--line)' }}>
       <Icon name="copy" size={14} />
       <input className="input sm mono flex-1" value={value} autoFocus onChange={(e) => setValue(e.target.value)} onKeyDown={(e) => { if (e.key === 'Enter') onConfirm(value); if (e.key === 'Escape') onClose() }} />
       <button className="btn primary sm" onClick={() => onConfirm(value)}>Rename</button>
@@ -394,7 +394,7 @@ function FileEditor({ server, path, onClose, onSaved }: { server: Server; path: 
 
   return (
     <div style={{ borderBottom: '1px solid var(--line)' }}>
-      <div className="flex items-center gap-2" style={{ padding: '10px 14px', borderBottom: '1px solid var(--line)' }}>
+      <div className="flex panel-row items-center gap-2" style={{ padding: '10px 14px', borderBottom: '1px solid var(--line)' }}>
         <Icon name="file" size={14} />
         <span className="mono sm">{path}</span>
         <span className={`xs ${saveState === 'error' ? '' : 'text-3'}`} style={{ color: saveState === 'error' ? 'var(--danger)' : saveState === 'saving' ? 'var(--warn)' : saveState === 'dirty' ? 'var(--warn)' : undefined }}>

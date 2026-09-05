@@ -1802,8 +1802,8 @@ textarea.input { resize: vertical; min-height: 80px; }
   .grid.gap-3 > div { flex: 1 1 100%; max-width: 100%; }
   .field { margin-bottom: 12px; }
   
-  .select { min-width: 100%; }
-  .input { font-size: 14px; }
+  .wizard-step .select { min-width: 100%; }
+  .wizard-step .input { font-size: 16px; }
   
   .badge { font-size: 11px; }
   
@@ -1819,4 +1819,34 @@ textarea.input { resize: vertical; min-height: 80px; }
   .wizard-step { padding: 12px 16px; }
   .wizard-dot { width: 24px; height: 24px; }
   .wizard-label { font-size: 14px; }
+}
+
+/* ============================================================
+   General mobile hardening
+   ============================================================ */
+@media (max-width: 700px) {
+  /* Inline-template grids that never got a responsive breakpoint */
+  .grid.panel-2, .grid.panel-3 { grid-template-columns: 1fr !important; }
+
+  /* Form rows with inline widths: wrap instead of clipping.
+     (min-width:0 lets the growable field share the line.) */
+  .panel-row { flex-wrap: wrap; }
+  .panel-row > .flex-1 { flex: 1 1 auto; min-width: 0; }
+
+  /* Comfortable touch targets */
+  .switch-track { width: 44px; height: 26px; }
+  .switch-track .switch-thumb { width: 20px; height: 20px; top: 2px; left: 2px; }
+  .switch input:checked + .switch-track .switch-thumb { transform: translateX(18px); }
+  .btn.icon { width: 40px; height: 40px; }
+
+  /* List rows (schedules, files, access): allow the action column to drop
+     below the main content instead of squeezing it off-screen */
+  .row-item { flex-wrap: wrap; }
+
+  /* File manager: wrap the dense toolbars instead of clipping them against
+     .card { overflow: hidden } */
+  .fm-toolbar, .fm-create, .fm-selbar { flex-wrap: wrap; }
+
+  /* Clear the fixed bottom nav so nothing scrolls behind it */
+  .content-wrapper { padding-bottom: calc(76px + env(safe-area-inset-bottom)); }
 }

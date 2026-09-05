@@ -33,7 +33,7 @@ export function AccessTab({ server }: { server: Server }) {
       <div className="card">
         <div className="card-h"><Icon name="lock" size={15} /> Grant access</div>
         <div className="card-b">
-          <div className="flex gap-2" style={{ alignItems: 'flex-end' }}>
+          <div className="flex gap-2 panel-row" style={{ alignItems: 'flex-end' }}>
             <div className="field flex-1"><label>Email</label><input className="input" placeholder="user@example.com" value={email} onChange={(e) => setEmail(e.target.value)} /></div>
             <div className="field"><label>Role</label>
               <select className="select" value={role} onChange={(e) => setRole(e.target.value)}>

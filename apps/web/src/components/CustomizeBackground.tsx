@@ -116,7 +116,7 @@ export function CustomizeBackground() {
 
         {(mode === 'wallpaper' || mode === 'live') && (
           <>
-            <div className="grid" style={{ gridTemplateColumns: '1fr 1fr', gap: 12 }}>
+            <div className="grid panel-2" style={{ gridTemplateColumns: '1fr 1fr', gap: 12 }}>
               <div className="field">
                 <label>{mode === 'wallpaper' ? 'Image URL' : 'Video URL'}</label>
                 <input className="input mono xs" placeholder={mode === 'wallpaper' ? 'https://…/image.png or data:image/…' : 'https://…/clip.mp4 or data:video/…'} value={url} onChange={(e) => { setUrl(e.target.value); setBanner('') }} />

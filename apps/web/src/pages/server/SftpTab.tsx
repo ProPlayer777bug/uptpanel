@@ -55,7 +55,7 @@ export function SftpTab({ server }: { server: Server }) {
             remote panel. Sessions are sandboxed to this server's data directory only.
           </p>
 
-          <div className="grid" style={{ gridTemplateColumns: 'minmax(0,1fr) minmax(0,1fr)', gap: 10 }}>
+          <div className="grid panel-2" style={{ gridTemplateColumns: 'minmax(0,1fr) minmax(0,1fr)', gap: 10 }}>
             {[['Host', host], ['Port', String(creds.port)], ['Username', creds.username], ['Password', creds.password]].map(([label, value]) => (
               <div key={label} className="flex items-center gap-2" style={{ background: 'var(--bg-2)', border: '1px solid var(--line)', borderRadius: 8, padding: '8px 10px' }}>
                 <span className="xs text-3" style={{ width: 60 }}>{label}</span>

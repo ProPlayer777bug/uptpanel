@@ -220,7 +220,7 @@ export function AIBro() {
               ))}
               <div ref={endRef} />
             </div>
-            <div className="flex p-2" style={{ gap: 8, borderTop: '1px solid var(--line)', alignItems: 'center' }}>
+            <div className="flex panel-row p-2" style={{ gap: 8, borderTop: '1px solid var(--line)', alignItems: 'center' }}>
               <select className="select sm" value={chatProvider} onChange={(e) => setChatProvider(e.target.value)} style={{ maxWidth: 140 }}>
                 {providers.filter((p) => p.keyCount > 0).map((p) => <option key={p.id} value={p.id}>{p.label}</option>)}
               </select>

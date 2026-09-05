@@ -108,7 +108,7 @@ export function StartupTab({ server }: { server: Server }) {
         <input className="input" value={name} onChange={(e) => setName(e.target.value)} placeholder="Display name" />
 
         <div className="sm text-3 mb-2 mt-4">Server policies</div>
-        <div className="grid" style={{ gridTemplateColumns: '1fr 1fr', gap: 12 }}>
+        <div className="grid panel-2" style={{ gridTemplateColumns: '1fr 1fr', gap: 12 }}>
           <label>Backup limit
             <input className="inp" type="number" min={1} max={100} value={maxBackups} onChange={(e) => setMaxBackups(e.target.value)} />
             <span className="xs text-3">Max backups this server can hold at once (auto-backups prune to this too).</span>
@@ -151,7 +151,7 @@ export function StartupTab({ server }: { server: Server }) {
         )}
 
         <div className="sm text-3 mb-2 mt-4">Resource limits</div>
-        <div className="grid" style={{ gridTemplateColumns: '1fr 1fr 1fr', gap: 12 }}>
+        <div className="grid panel-3" style={{ gridTemplateColumns: '1fr 1fr 1fr', gap: 12 }}>
           <label>CPU % <input className="inp" type="number" value={limits.cpuPercent} onChange={(e) => setLimits({ ...limits, cpuPercent: Number(e.target.value) })} /></label>
           <label>Memory (MB) <input className="inp" type="number" value={limits.memoryLimitMb} onChange={(e) => setLimits({ ...limits, memoryLimitMb: Number(e.target.value) })} /></label>
           <label>Storage (GB) <input className="inp" type="number" value={limits.storageGb} onChange={(e) => setLimits({ ...limits, storageGb: Number(e.target.value) })} /></label>

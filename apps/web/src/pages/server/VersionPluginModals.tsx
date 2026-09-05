@@ -61,7 +61,7 @@ export function VersionManager({ server, open, onClose }: { server: Server; open
 
   return (
     <Modal open={open} onClose={onClose} title={`Change version — ${server.name}`} width={600}>
-      <div className="flex gap-2 mb-2">
+      <div className="flex gap-2 panel-row mb-2">
         <input className="input flex-1" placeholder="Search versions or platform…" value={query} onChange={(e) => setQuery(e.target.value)} />
         <select className="select" style={{ width: 150 }} value={platform} onChange={(e) => setPlatform(e.target.value)}>
           {PLATFORMS.map((p) => <option key={p.id} value={p.id}>{p.label}</option>)}
@@ -150,7 +150,7 @@ export function PluginManager({ server, open, onClose }: { server: Server; open:
 
   return (
     <Modal open={open} onClose={onClose} title={`Install plugins — ${server.name}`} width={600}>
-      <div className="flex gap-2 mb-2">
+      <div className="flex gap-2 panel-row mb-2">
         <input className="input flex-1" placeholder="Search plugins by name, author, or description…" value={query} onChange={(e) => setQuery(e.target.value)} />
         <select className="select" style={{ width: 130 }} value={source} onChange={(e) => setSource(e.target.value as any)}>
           <option value="all">All sources</option>

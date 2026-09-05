@@ -124,7 +124,7 @@ export function SchedulesTab({ server }: { server: Server }) {
           <label>Cron expression <input className="inp mono" value={cron} onChange={(e) => setCron(e.target.value)} placeholder="* * * * *" /></label>
           <div className="mt-2"><span className="sm text-3">Tasks (run in order)</span></div>
           {tasks.map((t, i) => (
-            <div key={i} className="flex gap-2 mt-1" style={{ alignItems: 'center' }}>
+            <div key={i} className="flex gap-2 panel-row mt-1" style={{ alignItems: 'center' }}>
               <select className="inp xs" style={{ width: 110 }} value={t.action} onChange={(e) => updateTask(i, { action: e.target.value, payload: '' })}>
                 {ACTIONS.map((a) => <option key={a} value={a}>{a}</option>)}
               </select>
