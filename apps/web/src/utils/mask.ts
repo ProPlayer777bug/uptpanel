@@ -68,3 +68,11 @@ export function publicAddress(alloc: { alias?: string; ip?: string; port?: numbe
   if (host && alloc?.port) return `${host}:${alloc.port}`
   return ''
 }
+
+// The allocation advertised as a server's connect address: the user-selected
+// primary, falling back to the first allocation.
+export function primaryAllocation(server: { allocations?: any[]; primaryAllocationId?: string | null } | undefined | null): any | undefined {
+  const allocs = server?.allocations || []
+  const byId = allocs.find((a: any) => a.id === server?.primaryAllocationId)
+  return byId || allocs[0]
+}

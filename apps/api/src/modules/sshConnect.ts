@@ -11,6 +11,7 @@
 import { Client } from 'ssh2'
 import { readFileSync, existsSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
+import { spawnSync } from 'node:child_process'
 
 export interface SshCreds {
   host: string
@@ -53,6 +54,71 @@ function resolveAgentBin(): string {
     if (c && existsSync(c)) return c
   }
   return candidates.find(Boolean) || '/usr/local/bin/uh-agent'
+}
+
+// Best effort to make the `go` toolchain available on the panel host.
+function ensureGo(): void {
+  const probe = spawnSync('go', ['version'], { stdio: 'pipe' })
+  if (probe.status === 0) return
+  const attempts: string[][] = []
+  if (process.getuid?.() === 0) {
+    if (existsSync('/usr/bin/apt-get')) attempts.push(['apt-get', 'update', '-y'])
+    if (existsSync('/usr/bin/apt-get')) attempts.push(['apt-get', 'install', '-y', 'golang-go'])
+    else if (existsSync('/usr/bin/dnf')) attempts.push(['dnf', 'install', '-y', 'golang'])
+    else if (existsSync('/usr/bin/yum')) attempts.push(['yum', 'install', '-y', 'golang'])
+  } else if (existsSync('/usr/local/bin/brew')) {
+    attempts.push(['/usr/local/bin/brew', 'install', 'go'])
+  }
+  for (const cmd of attempts) {
+    try {
+      const r = spawnSync(cmd[0], cmd.slice(1), { stdio: 'inherit', timeout: 300000 })
+      if (r.status === 0) break
+    } catch { /* try next installer */ }
+  }
+  if (spawnSync('go', ['version'], { stdio: 'pipe' }).status !== 0) {
+    throw new Error('Go toolchain unavailable — install Go, or pre-build the agent (services/agent/bin/uh-agent / UH_AGENT_BIN) and retry')
+  }
+}
+
+// Build the node agent from the checked-out Go module at services/agent.
+// A static (CGO_ENABLED=0) binary is produced so it runs on any remote Linux.
+async function buildAgentBinary(target: string): Promise<string> {
+  ensureGo()
+  let agentDir = ''
+  try {
+    const here = fileURLToPath(new URL('.', import.meta.url))
+    const repo = `${here}../../../../services/agent`
+    if (existsSync(`${repo}/go.mod`)) agentDir = repo
+  } catch { /* fall through to cwd guess */ }
+  if (!agentDir && existsSync('/root/uptimehost/services/agent/go.mod')) agentDir = '/root/uptimehost/services/agent'
+  if (!agentDir && existsSync('./services/agent/go.mod')) agentDir = './services/agent'
+  if (!agentDir) throw new Error('Could not locate the services/agent Go module to build uh-agent')
+  const res = spawnSync('go', ['mod', 'download'], { cwd: agentDir, stdio: 'pipe', timeout: 300000 })
+  if (res.status !== 0) throw new Error(`go mod download failed: ${(res.stderr || '').toString().slice(-400)}`)
+  const build = spawnSync('go', ['build', '-ldflags=-s -w', '-o', target, './cmd/agent'], {
+    cwd: agentDir,
+    stdio: 'pipe',
+    timeout: 600000,
+    env: { ...process.env, CGO_ENABLED: '0' },
+  })
+  if (build.status !== 0) throw new Error(`uh-agent build failed: ${(build.stderr || '').toString().slice(-800)}`)
+  return target
+}
+
+// Always guarantee a usable agent binary, building it on demand if needed.
+export async function ensureAgentBinary(): Promise<string> {
+  let bin = resolveAgentBin()
+  if (bin && existsSync(bin)) return bin
+  for (const c of [process.env.UH_AGENT_BIN, '/root/uptimehost/services/agent/bin/uh-agent', './services/agent/bin/uh-agent']) {
+    if (c) {
+      try {
+        return await buildAgentBinary(c)
+      } catch (e) {
+        bin = c
+      }
+    }
+  }
+  throw new Error(`Unable to produce uh-agent binary: ${bin}`)
 }
 
 function stringifyErr(e: any): string {
@@ -188,12 +254,14 @@ export interface SshInstallSpec {
   host: string // advertised host the panel should use to reach the agent
   listenPort: number // agent listen port (7373)
   scheme?: 'http' | 'https'
+  sftpPort?: number // agent SFTP/SFTP listen port (2022)
+  sftpAuthUrl?: string // panel endpoint the agent calls to validate SFTP passwords
 }
 
 // Install + start the node agent on the remote. Binary is uploaded first, then a
 // single bash script provisions env + systemd unit and starts the agent.
 export async function sshInstall(creds: SshCreds, spec: SshInstallSpec): Promise<string> {
-  const bin = resolveAgentBin()
+  const bin = await ensureAgentBinary()
   if (!existsSync(bin)) throw new Error(`Agent binary not found (${bin}) — set UH_AGENT_BIN`)
 
   // 1) Upload binary to a world-writable staging path, then `install` moves it.
@@ -211,6 +279,8 @@ export async function sshInstall(creds: SshCreds, spec: SshInstallSpec): Promise
     `UH_AGENT_HOST=${spec.host}`,
     `UH_CONTAINER_BASE=/var/lib/uptimehost/data`,
     `UH_POLL_INTERVAL=5`,
+    ...(spec.sftpPort ? [`UH_SFTP_ADDR=0.0.0.0:${spec.sftpPort}`] : []),
+    ...(spec.sftpAuthUrl ? [`UH_SFTP_AUTH_URL=${spec.sftpAuthUrl}`] : []),
   ]
 
   const script = [

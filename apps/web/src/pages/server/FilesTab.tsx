@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { api, downloadBlob, uploadForm } from '../../api/client'
 import { Icon, Spinner, toast, ConfirmDialog, Menu } from '../../components/ui'
+import { useApp } from '../../state/auth'
+import { VersionManager, PluginManager, isMcServer } from './VersionPluginModals'
 import type { Server } from '@uptimehost/types'
 
 interface FEntry { name: string; path: string; isDir: boolean; size?: number }
@@ -19,6 +21,7 @@ const FM_THEMES = [
 ]
 
 export function FilesTab({ server }: { server: Server }) {
+  const { refresh } = useApp()
   const [cwd, setCwd] = useState('/')
   const [files, setFiles] = useState<FEntry[] | null>(null)
   const [loading, setLoading] = useState(true)
@@ -32,16 +35,33 @@ export function FilesTab({ server }: { server: Server }) {
   const [deleteTargets, setDeleteTargets] = useState<string[] | null>(null)
   const [fmTheme, setFmTheme] = useState(() => localStorage.getItem('uh_fm_theme') || '')
   const [themeOpen, setThemeOpen] = useState(false)
+  const [showVersions, setShowVersions] = useState(false)
+  const [showPlugins, setShowPlugins] = useState(false)
+  const [javaOpen, setJavaOpen] = useState(false)
+  const [javaBusy, setJavaBusy] = useState(false)
   const uploadRef = useRef<HTMLInputElement>(null)
 
+  const JAVA_VERSIONS = [8, 11, 16, 17, 21, 25]
+
+  const changeJava = async (v: number) => {
+    if (v === server.javaVersion) { setJavaOpen(false); return }
+    setJavaBusy(true)
+    try {
+      await api.post(`/servers/${server.id}/java`, { version: v })
+      toast.ok(`Java ${v} applied — server stopped, ready to start`)
+      refresh()
+    } catch (e: any) { toast.err(e?.message || 'Failed to change Java') }
+    finally { setJavaBusy(false); setJavaOpen(false) }
+  }
+
   useEffect(() => {
-    if (!themeOpen) return
-    const onDoc = () => setThemeOpen(false)
-    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setThemeOpen(false) }
+    if (!themeOpen && !javaOpen) return
+    const onDoc = () => { setThemeOpen(false); setJavaOpen(false) }
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') { setThemeOpen(false); setJavaOpen(false) } }
     document.addEventListener('click', onDoc)
     document.addEventListener('keydown', onKey)
     return () => { document.removeEventListener('click', onDoc); document.removeEventListener('keydown', onKey) }
-  }, [themeOpen])
+  }, [themeOpen, javaOpen])
 
   const pickFmTheme = (id: string) => {
     setFmTheme(id)
@@ -195,6 +215,28 @@ export function FilesTab({ server }: { server: Server }) {
         <button className="btn sm ghost" disabled={busy} onClick={() => uploadRef.current?.click()}><Icon name="upload" size={13} /> Upload</button>
         <button className="btn sm ghost" onClick={() => { setCreating((v) => !v); setNewName('') }}><Icon name="folder" size={13} /> New</button>
         <button className="btn sm ghost" disabled={busy} onClick={() => load(cwd)}><Icon name="restart" size={13} /> Refresh</button>
+        {isMcServer(server) && (server.permissions?.files === true || server.permissions?.admin === true) && (
+          <>
+            <button className="btn sm ghost" onClick={() => setShowPlugins(true)}><Icon name="box" size={13} /> Plugins</button>
+            <button className="btn sm ghost" onClick={() => setShowVersions(true)}><Icon name="activity" size={13} /> Version</button>
+            <div style={{ position: 'relative' }} onClick={(e) => { e.stopPropagation(); setJavaOpen((v) => !v) }}>
+              <button className={`btn sm ghost${javaBusy ? '' : ''}`} title="Java runtime this server boots with">
+                {javaBusy ? <Spinner size={13} /> : <Icon name="chip" size={13} />} Java {server.javaVersion || '?'}
+              </button>
+              {javaOpen && (
+                <div className="fm-theme-menu" role="menu" style={{ width: 160 }} onClick={(e) => e.stopPropagation()}>
+                  {JAVA_VERSIONS.map((v) => (
+                    <button key={v} className={`fm-theme-item${server.javaVersion === v ? ' active' : ''}`} onClick={() => changeJava(v)}>
+                      <span>Java {v}</span>
+                      {server.javaVersion === v && <Icon name="check" size={13} />}
+                    </button>
+                  ))}
+                  <div className="xs text-3" style={{ padding: '6px 10px' }}>Restarts the server with the chosen JVM (stops a running server).</div>
+                </div>
+              )}
+            </div>
+          </>
+        )}
         <button
           className={`btn sm ${selCount > 0 ? '' : 'ghost'}`}
           title={selCount > 0 ? `${selCount} selected — click to clear or use Delete below` : 'Mass select files'}
@@ -292,6 +334,9 @@ export function FilesTab({ server }: { server: Server }) {
         onClose={() => setDeleteTargets(null)}
         onConfirm={doDelete}
       />
+
+      <VersionManager server={server} open={showVersions} onClose={() => setShowVersions(false)} />
+      <PluginManager server={server} open={showPlugins} onClose={() => setShowPlugins(false)} />
     </div>
   )
 }

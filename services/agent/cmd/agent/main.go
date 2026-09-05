@@ -15,6 +15,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -22,6 +23,7 @@ import (
 	"github.com/uptimehost/agent/internal/docker"
 	"github.com/uptimehost/agent/internal/hoststats"
 	"github.com/uptimehost/agent/internal/httpapi"
+	"github.com/uptimehost/agent/internal/sftp"
 )
 
 func main() {
@@ -64,6 +66,22 @@ func main() {
 	// system and connect back to the panel) and then keeps reporting liveness.
 	if cfg.CoreURL != "" {
 		go heartbeat(ctx, cfg, dm)
+	}
+
+	// Optional per-server SFTP access, chrooted to each server's data directory.
+	if cfg.SftpAddr != "" && cfg.SftpAuthURL != "" {
+		sf := sftp.New(
+			cfg.SftpAddr,
+			cfg.ContainerBase,
+			filepath.Join(filepath.Dir(cfg.ContainerBase), "etc", "sftp_host_key"),
+			cfg.SftpAuthURL,
+			cfg.Token,
+		)
+		go func() {
+			if err := sf.Start(ctx); err != nil {
+				log.Printf("agent: sftp server stopped: %v", err)
+			}
+		}()
 	}
 
 	<-ctx.Done()

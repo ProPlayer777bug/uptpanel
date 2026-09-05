@@ -98,6 +98,18 @@ export class AgentClient {
     return this.req('POST', `/api/servers/${serverId}/commands`, { commands: [cmd] })
   }
 
+  // ---- Players (Player Management Center) ----
+  players(serverId: string) {
+    return this.req('GET', `/api/servers/${serverId}/players`)
+  }
+  playerAction(serverId: string, body: { player: string; action: string; args?: string[] }) {
+    return this.req('POST', `/api/servers/${serverId}/players/action`, body)
+  }
+  /** Enables the built-in RCON listener (patches server.properties in place). */
+  ensureRCON(serverId: string) {
+    return this.req('POST', `/api/servers/${serverId}/players/rcon`, { enabled: true })
+  }
+
   // ---- Files ----
   listFiles(serverId: string, path: string) {
     return this.req('GET', `/api/servers/${serverId}/files?path=${encodeURIComponent(path)}`)
@@ -131,6 +143,12 @@ export class AgentClient {
   }
   closeFirewall(serverId: string, port: number) {
     return this.req('POST', `/api/servers/${serverId}/firewall/close`, { port })
+  }
+  setAntiDdos(serverId: string, cfg: { enabled: boolean; ports: number[]; level: string }) {
+    return this.req('POST', `/api/servers/${serverId}/antiddos`, cfg)
+  }
+  antiDdosStatus(serverId: string) {
+    return this.req<{ ok: boolean; enabled: boolean; ports: number[] }>('GET', `/api/servers/${serverId}/antiddos`)
   }
   // Get a file's bytes for browser download.
   downloadFileBytes(serverId: string, path: string): Promise<Response> {

@@ -181,6 +181,8 @@ export interface Server {
   storageGb: number
   extraEnv: Record<string, string>
   allocations: Allocation[]
+  /** The allocation advertised as the server's connect address. */
+  primaryAllocationId?: string | null
   createdAt: number
   installed: boolean
   startedAt: number | null
@@ -194,6 +196,10 @@ export interface Server {
   javaVersion?: number
   /** Extra environment derived from the server's pinned runtime. */
   javaEnv?: Record<string, string>
+  /** Per-server backup quota set by the admin at creation time. */
+  maxBackups?: number
+  /** Per-server allocation (port) quota, defaults to 1. */
+  maxAllocations?: number
   node?: { id: string; name: string; host?: string; status: string; agentUrl: string } | null
   blueprint?: Blueprint | null
 }

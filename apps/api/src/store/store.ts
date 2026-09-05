@@ -26,6 +26,7 @@ export interface DBShape {
   orgs: any[]
   invocations: Record<string, any[]>
   backups: any[]
+  playerRecords: any[]
   schedules: any[]
   scheduleRuns: any[]
   databases: any[]
@@ -57,6 +58,7 @@ export function freshDb(): DBShape {
     orgs: [],
     invocations: {},
     backups: [],
+    playerRecords: [],
     schedules: [],
     scheduleRuns: [],
     databases: [],

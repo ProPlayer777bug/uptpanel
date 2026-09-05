@@ -106,16 +106,16 @@ export function serverAccess(user: any, server: any, store: Store): { ok: boolea
       return { ok, permissions: ok ? perms : {} }
     }
     // account key
-    if (roleRank(user.role) >= 4) return { ok: true, permissions: { view: true, command: true, files: true, modify: true, access: true, admin: true } }
+    if (roleRank(user.role) >= 4) return { ok: true, permissions: { view: true, command: true, files: true, snapshot: true, restore: true, modify: true, access: true, admin: true } }
     // account key owned by a non-admin user: fall through to owner/access logic
   }
-  if (roleRank(user.role) >= 4) return { ok: true, permissions: { view: true, command: true, files: true, modify: true, access: true, admin: true } }
+  if (roleRank(user.role) >= 4) return { ok: true, permissions: { view: true, command: true, files: true, snapshot: true, restore: true, modify: true, access: true, admin: true } }
 
   const entry = store.db.access.find((a) => a.serverId === server.id && a.email === user.email)
   const perms: Record<string, boolean> = entry?.permissions || defaultServerPerms(entry?.role)
   // Owner-by-email implicitly has full rights.
   const isOwner = server.ownerEmail && server.ownerEmail === user.email
-  if (isOwner) return { ok: true, permissions: { view: true, command: true, files: true, modify: true, access: true, admin: true } }
+  if (isOwner) return { ok: true, permissions: { view: true, command: true, files: true, snapshot: true, restore: true, modify: true, access: true, admin: true } }
   if (entry) return { ok: perms.view === true, permissions: perms }
   return { ok: false, permissions: {} }
 }
@@ -124,8 +124,8 @@ function defaultServerPerms(role: string | undefined): Record<string, boolean> {
   const owner: Record<string, boolean> = { view: true, command: true, files: true, snapshot: true, restore: true, access: true, admin: true }
   if (role === 'admin') return { ...owner }
   if (role === 'operator') return { ...owner, admin: false }
-  if (role === 'developer') return { view: true, command: true, files: true, snapshot: false, restore: false, access: false, admin: false }
-  return { view: true, command: false, files: false, snapshot: false, restore: false, access: false, admin: false }
+  if (role === 'developer') return { view: true, command: true, files: true, snapshot: true, restore: true, access: false, admin: false }
+  return { view: true, command: true, files: true, snapshot: true, restore: true, access: false, admin: false }
 }
 
 export function audit(store: Store, actor: string, action: string, target: string, before?: unknown, after?: unknown) {

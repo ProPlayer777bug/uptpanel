@@ -6,30 +6,36 @@ import { Shell } from '../../components/Shell'
 import { OverviewTab } from './OverviewTab'
 import { ConsoleTab } from './ConsoleTab'
 import { FilesTab } from './FilesTab'
+import { SftpTab } from './SftpTab'
 import { SnapshotsTab } from './SnapshotsTab'
 import { BackupsTab } from './BackupsTab'
 import { SchedulesTab } from './SchedulesTab'
 import { DatabasesTab } from './DatabasesTab'
 import { StartupTab } from './StartupTab'
 import { NetworkTab } from './NetworkTab'
+import { AllocationsTab } from './AllocationsTab'
+import { PlayersTab } from './PlayersTab'
+import { isMcServer } from './VersionPluginModals'
 import { AccessTab } from './AccessTab'
 import { ApiTab } from './ApiTab'
 import { SettingsTab } from './SettingsTab'
-import { VersionManager, PluginManager, isMcServer } from './VersionPluginModals'
-import { publicAddress } from '../../utils/mask'
+import { publicAddress, primaryAllocation } from '../../utils/mask'
 
-type Tab = 'overview' | 'console' | 'files' | 'snapshots' | 'backups' | 'schedules' | 'databases' | 'startup' | 'network' | 'access' | 'api' | 'settings'
-const ADMIN_TABS: Tab[] = ['startup', 'network', 'snapshots', 'access', 'api', 'settings', 'databases', 'schedules', 'backups']
-const TABS: { id: Tab; label: string; icon: any; admin?: boolean }[] = [
+type Tab = 'overview' | 'console' | 'players' | 'files' | 'sftp' | 'snapshots' | 'backups' | 'schedules' | 'databases' | 'startup' | 'network' | 'allocations' | 'access' | 'api' | 'settings'
+const ADMIN_TABS: Tab[] = ['startup', 'access', 'api', 'settings', 'databases', 'schedules']
+const TABS: { id: Tab; label: string; icon: any; admin?: boolean; perm?: string; mc?: boolean }[] = [
   { id: 'overview', label: 'Overview', icon: 'home' },
   { id: 'console', label: 'Console', icon: 'terminal' },
+  { id: 'players', label: 'Players', icon: 'user', perm: 'command', mc: true },
   { id: 'files', label: 'Files', icon: 'folder' },
+  { id: 'sftp', label: 'SFTP', icon: 'key', perm: 'files' },
+  { id: 'allocations', label: 'Allocations', icon: 'node', perm: 'files' },
   { id: 'startup', label: 'Startup', icon: 'gear', admin: true },
-  { id: 'network', label: 'Network', icon: 'node', admin: true },
-  { id: 'backups', label: 'Backups', icon: 'download', admin: true },
+  { id: 'network', label: 'Network', icon: 'shieldCheck', perm: 'files' },
+  { id: 'backups', label: 'Backups', icon: 'download', perm: 'files' },
   { id: 'schedules', label: 'Schedules', icon: 'activity', admin: true },
   { id: 'databases', label: 'Databases', icon: 'chip', admin: true },
-  { id: 'snapshots', label: 'Snapshots', icon: 'snap', admin: true },
+  { id: 'snapshots', label: 'Snapshots', icon: 'snap', perm: 'snapshot' },
   { id: 'access', label: 'Users', icon: 'lock', admin: true },
   { id: 'api', label: 'API', icon: 'key', admin: true },
   { id: 'settings', label: 'Settings', icon: 'gear', admin: true },
@@ -41,13 +47,12 @@ export function ServerWorkspace() {
   const { data, loading } = useServer(id)
   const server = data?.server
   const [tab, setTab] = useState<Tab>('overview')
-  const [showVersions, setShowVersions] = useState(false)
-  const [showPlugins, setShowPlugins] = useState(false)
 
   const perms = server?.permissions || {}
   const role = server?.role
   const canAdminServer = perms.admin === true || role === 'admin' || role === 'owner'
-  const visibleTabs = TABS.filter((t) => !t.admin || canAdminServer)
+  const hasPerm = (perm?: string) => (perm ? perms[perm] === true || canAdminServer : true)
+  const visibleTabs = TABS.filter((t) => (!t.admin || canAdminServer) && hasPerm(t.perm) && (!t.mc || isMcServer(server as any)))
 
   useEffect(() => {
     if (server && !canAdminServer && ADMIN_TABS.includes(tab)) setTab('overview')
@@ -56,9 +61,10 @@ export function ServerWorkspace() {
   if (loading && !server) return <div className="center" style={{ padding: 80 }}><Spinner size={28} /></div>
   if (!server) return <div className="center" style={{ padding: 80, color: 'var(--text-3)' }}>Server not found</div>
 
-  const a0 = server.allocations?.[0]
-  // The address users actually connect with: alias hostname if set, else the
-  // node's public host/IP, plus the port. Never masked — it must be usable.
+  const a0 = primaryAllocation(server)
+  // The address users actually connect with: the primary allocation's alias
+  // hostname if set, else the node's public host/IP, plus the port. Never
+  // masked — it must be usable.
   const address = a0 ? publicAddress(a0, server.node) || `${a0.ip || server.node?.host || '—'}:${a0.port}` : '—'
 
   const subnav = (
@@ -81,12 +87,6 @@ export function ServerWorkspace() {
             <h1 style={{ fontSize: 20, fontWeight: 600 }}>{server.name}</h1>
             <StatePill state={server.state} pulse />
             <div style={{ flex: 1 }} />
-            {isMcServer(server) && canAdminServer && (
-              <>
-                <button className="btn sm" onClick={() => setShowPlugins(true)}><Icon name="box" size={14} /> Plugins</button>
-                <button className="btn sm" onClick={() => setShowVersions(true)}><Icon name="activity" size={14} /> Version</button>
-              </>
-            )}
             <Menu trigger={<span className="nav-icon-btn"><Icon name="dots" size={16} /></span>} align="right"
               items={[{ label: 'Copy address', icon: 'copy', onClick: () => navigator.clipboard?.writeText(address) }]}
             />
@@ -106,20 +106,20 @@ export function ServerWorkspace() {
           {tab === 'overview' && <OverviewTab server={server} />}
           {tab === 'console' && <ConsoleTab server={server} />}
           {tab === 'files' && <FilesTab server={server} />}
+          {tab === 'sftp' && <SftpTab server={server} />}
           {tab === 'startup' && <StartupTab server={server} />}
           {tab === 'backups' && <BackupsTab server={server} />}
           {tab === 'schedules' && <SchedulesTab server={server} />}
           {tab === 'databases' && <DatabasesTab server={server} />}
           {tab === 'network' && <NetworkTab server={server} />}
+          {tab === 'allocations' && <AllocationsTab server={server} />}
+          {tab === 'players' && <PlayersTab server={server} />}
           {tab === 'snapshots' && <SnapshotsTab server={server} />}
           {tab === 'access' && <AccessTab server={server} />}
           {tab === 'api' && <ApiTab server={server} />}
           {tab === 'settings' && <SettingsTab server={server} />}
         </div>
       </div>
-
-      <VersionManager server={server} open={showVersions} onClose={() => setShowVersions(false)} />
-      <PluginManager server={server} open={showPlugins} onClose={() => setShowPlugins(false)} />
     </Shell>
   )
 }

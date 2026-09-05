@@ -11,7 +11,7 @@ import rateLimit from '@fastify/rate-limit'
 import { Store } from './store/store.js'
 import { seed } from './sim/seed.js'
 import { WsHub } from './ws/hub.js'
-import { randomBytes } from 'node:crypto'
+import { randomBytes, timingSafeEqual } from 'node:crypto'
 import { nanoid } from 'nanoid'
 import { requireAuth, createSession, verifyPw, hashPw, can, audit, isGlobalAdmin, serverAccess, generateKeyToken } from './modules/auth.js'
 import { issueOtp, verifyOtp, sendOtp, oauthAuthorizeUrl, oauthCallback, oauthCallbackUrl, appBaseUrl, providerFlags, getAuthSettings, setAuthSettings, publicAuthSettings, validateOAuthState } from './modules/providers.js'
@@ -19,6 +19,7 @@ import { AgentClient, agentFor } from './modules/agentClient.js'
 import { sshProbe, sshInstall } from './modules/sshConnect.js'
 import { startMCVersionWatcher, currentDefaults, javaImage, mcState, refreshMCManifest } from './modules/mcVersions.js'
 import { refreshCatalog, snapshot as catalogSnapshot, resolveVersionDownload, resolvePluginDownload, startCatalogWatcher } from './modules/catalog.js'
+import { chat as aibroChat, addKey as aibroAddKey, removeKey as aibroRemoveKey, keysFor as aibroKeysFor, AIBRO_PROVIDERS, setNanoid as aibroSetNanoid } from './modules/aibro.js'
 import WebSocket from 'ws'
 
 const PORT = Number(process.env.UH_API_PORT || 8081)
@@ -39,6 +40,7 @@ const eulaPromptAt: Record<string, number> = {}
 // precedence as a hard override.
 const app = Fastify({ logger: false, trustProxy: true })
 const store = new Store()
+aibroSetNanoid(nanoid)
 seed(store)
 // Backfill: ensure capacity/maintenance/connectivity fields exist on nodes
 // persisted before they were introduced so checks and the UI are consistent.
@@ -621,6 +623,19 @@ function publicUser(u: any) {
   const { passwordHash, phone, googleId, githubId, ...rest } = u
   return rest
 }
+
+// validLim coerces a numeric quota to a safe bounded integer, or returns the
+// fallback when the input is missing or out of range.
+function validLim(v: any, min: number, max: number, fallback?: number): number | undefined {
+  const n = Number(v)
+  if (!Number.isFinite(n)) return fallback
+  return Math.min(max, Math.max(min, Math.round(n)))
+}
+
+// toInt coerces user input to a number ('' / missing / null → undefined).
+function toInt(v: any) {
+  return v === '' || v === undefined || v === null ? undefined : Number(v)
+}
 function activity(user: any, kind: string, severity: string, message: string, extra: any = {}) {
   const item = { id: nanoid(10), ts: Date.now(), kind, severity, message, actor: user?.name || 'system', actorId: user?.id, ...extra }
   store.db.activity.unshift(item)
@@ -745,6 +760,29 @@ function generateNodeToken(): string {
   return 'uh_nt_' + randomBytes(24).toString('hex')
 }
 
+// Constant-time string comparison for bearer/password checks.
+function safeEqual(a: string, b: string): boolean {
+  const ab = Buffer.from(a)
+  const bb = Buffer.from(b)
+  if (ab.length !== bb.length) return false
+  return timingSafeEqual(ab, bb)
+}
+
+// Per-server SFTP password: generated lazily on first request and persisted so
+// the value survives restarts. Returns the plaintext once — callers must never
+// log or expose it beyond the intended SFTP screen.
+function serverSftpPassword(server: any, force = false): string {
+  if (force || !server.sftpPassword) {
+    server.sftpPassword = 'uhsp_' + randomBytes(16).toString('base64url')
+    store.persist()
+  }
+  return server.sftpPassword
+}
+
+function sftpPortFor(node: any): number {
+  return Number(node?.config?.sftpPort) || 2022
+}
+
 // ---------------------------------------------------------------------------
 // Node connectivity (§ node connect) — FQDN + scheme(http/https) + port.
 // The panel stores a connectivity descriptor and an install command that any
@@ -842,6 +880,14 @@ function buildInstallCommand(node: any): string {
     ? [`UH_AGENT_TLS_CERT=/etc/uptimehost/server.crt`, `UH_AGENT_TLS_KEY=/etc/uptimehost/server.key`]
     : []
 
+  // Per-server SFTP access. UH_SFTP_AUTH_URL lets the agent validate client
+  // passwords against this panel; it only works when the node can reach the
+  // panel at a stable public URL.
+  const sftpPort = sftpPortFor(node)
+  const sftpEnv = panel
+    ? [`UH_SFTP_ADDR=:${sftpPort}`, `UH_SFTP_AUTH_URL=${panel}/api/nodes/${id}/sftp-auth`]
+    : []
+
   return [
     `# One-command UptimeHost node install. Requires: git + go (and openssl for https).`,
     `# Paste on the node, then the agent configures + starts itself (idempotent: re-running restarts it).`,
@@ -865,6 +911,7 @@ function buildInstallCommand(node: any): string {
     `UH_AGENT_HOST=${host}`,
     `UH_CONTAINER_BASE=/var/lib/uptimehost/data`,
     ...tlsEnv,
+    ...sftpEnv,
     `ENV`,
     `if command -v systemctl >/dev/null 2>&1; then`,
     `  cat > /etc/systemd/system/uh-agent.service <<'SVC'`,
@@ -1078,6 +1125,8 @@ app.post('/api/nodes/auto/install', async (req, reply) => {
       agentToken: node.agentToken,
       regToken: node.registrationToken,
       registerUrl: `${panel}/api/nodes/register`,
+      sftpAuthUrl: `${panel}/api/nodes/${node.id}/sftp-auth`,
+      sftpPort: sftpPortFor(node),
       host: creds.host,
       listenPort: node.port,
       scheme: 'http',
@@ -1396,6 +1445,25 @@ app.post('/api/nodes/:id/maintenance', async (req, reply) => {
   return { ok: true, node: withHealth(node) }
 })
 
+// The agent's built-in SFTP service calls this to validate per-server
+// credentials. The agent authenticates with the node agentToken; the password
+// is checked against the server's stored sftpPassword in constant time.
+app.post('/api/nodes/:id/sftp-auth', async (req, reply) => {
+  const { id } = req.params as any
+  const node = store.db.nodes.find((n) => n.id === id)
+  if (!node) return reply.code(404).send({ ok: false, error: 'NODE_NOT_FOUND' })
+  const bearer = (req.headers.authorization || '').replace(/^Bearer\s+/i, '')
+  if (!node.agentToken || !bearer || !safeEqual(bearer, node.agentToken)) {
+    return reply.code(401).send({ ok: false, error: 'UNAUTHORIZED' })
+  }
+  const body = (req.body || {}) as any
+  const server = store.db.servers.find((s) => s.id === body.serverId && s.nodeId === node.id)
+  if (!server || !server.sftpPassword || typeof body.password !== 'string' || !safeEqual(body.password, server.sftpPassword)) {
+    return { ok: false }
+  }
+  return { ok: true }
+})
+
 // Node token rotation (§4): generate a fresh cryptographically random secret.
 // The new token is returned exactly once so the admin can re-provision the agent.
 app.post('/api/nodes/:id/rotate-token', async (req, reply) => {
@@ -1553,12 +1621,13 @@ app.get('/api/catalog', async (req) => {
 app.post('/api/servers/:id/version', async (req, reply) => {
   const user = me(req)
   if (!user) return reply.code(401).send({ ok: false, error: 'UNAUTHENTICATED' })
-  if (!can(user, 'admin')) return reply.code(403).send({ ok: false, error: 'FORBIDDEN' })
   const { id } = req.params as any
   const { version } = (req.body || {}) as any
   if (!version) return reply.code(400).send({ ok: false, error: 'VERSION_REQUIRED' })
   const server = store.db.servers.find((s) => s.id === id)
   if (!server) return reply.code(404).send({ ok: false, error: 'SERVER_NOT_FOUND' })
+  const acc = serverAccess(user, server, store)
+  if (!acc.ok || !acc.permissions.files) return reply.code(403).send({ ok: false, error: 'FORBIDDEN' })
   if (!(server.blueprintId === 'bp-minecraft' || server.blueprintId === 'bp-paper')) {
     return reply.code(400).send({ ok: false, error: 'NOT_A_MINECRAFT_SERVER' })
   }
@@ -1624,17 +1693,71 @@ app.post('/api/servers/:id/version', async (req, reply) => {
   }
 })
 
+// Change the Java runtime a Minecraft server boots with. The server.jar is
+// unchanged — only the runtime image (and javaVersion pin) is swapped, which
+// matters when plugins or a server jar need an older/newer JVM. Requires the
+// server to be stopped; a running server is stopped and left offline.
+app.post('/api/servers/:id/java', async (req, reply) => {
+  const user = me(req)
+  if (!user) return reply.code(401).send({ ok: false, error: 'UNAUTHENTICATED' })
+  const { id } = req.params as any
+  const version = Number((req.body || {} as any)?.version)
+  const server = store.db.servers.find((s) => s.id === id)
+  if (!server) return reply.code(404).send({ ok: false, error: 'SERVER_NOT_FOUND' })
+  const acc = serverAccess(user, server, store)
+  if (!acc.ok || !acc.permissions.files) return reply.code(403).send({ ok: false, error: 'FORBIDDEN' })
+  if (!(server.blueprintId === 'bp-minecraft' || server.blueprintId === 'bp-paper')) {
+    return reply.code(400).send({ ok: false, error: 'NOT_A_MINECRAFT_SERVER' })
+  }
+  const allowed = [8, 11, 16, 17, 21, 25]
+  if (!allowed.includes(version)) return reply.code(400).send({ ok: false, error: 'INVALID_JAVA', detail: `Java must be one of ${allowed.join('/')}` })
+  if (server.javaVersion === version) return { ok: true, server: withRelations(server) }
+
+  const node = store.db.nodes.find((n) => n.id === server.nodeId)
+  const client = node ? agentFor(node) : null
+  if (!client) return reply.code(409).send({ ok: false, error: 'NODE_UNREACHABLE' })
+
+  const wasRunning = server.state !== 'offline' && server.state !== 'stopping' && server.state !== 'suspended'
+  server.javaVersion = version
+  server.image = javaImage(version)
+  store.persist()
+  pushTerminal(id, `[java] switching runtime to Java ${version} — recreating container`, 'warn')
+  if (wasRunning) {
+    try { await client.power(id, 'stop') } catch { /* may already be stopped */ }
+  }
+  try {
+    await client.remove(id)
+    await client.createContainer(buildManifest(server))
+  } catch (e: any) {
+    server.error = String(e?.message || e)
+    store.persist()
+    broadcastServer(`srv:${id}`, server, user)
+    return reply.code(500).send({ ok: false, error: 'JAVA_CHANGE_FAILED', message: server.error })
+  }
+  server.state = 'offline'
+  server.startedAt = null
+  server.error = undefined
+  server.lastAction = 'java'
+  store.persist()
+  pushTerminal(id, `[java] now on Java ${version} — server ready to start`, 'info')
+  activity(user, 'server', 'info', `Changed ${server.name} to Java ${version}`, { serverId: id })
+  audit(store, user.name, 'CHANGE_JAVA', `server:${server.name} -> ${version}`)
+  broadcastServer(`srv:${id}`, server, user)
+  return { ok: true, server: withRelations(server) }
+})
+
 // Install a plugin (from SpigotMC / Modrinth catalog) onto a Minecraft server.
 // The jar is downloaded onto the node into the server's plugins/ folder.
 app.post('/api/servers/:id/plugins', async (req, reply) => {
   const user = me(req)
   if (!user) return reply.code(401).send({ ok: false, error: 'UNAUTHENTICATED' })
-  if (!can(user, 'admin')) return reply.code(403).send({ ok: false, error: 'FORBIDDEN' })
   const { id } = req.params as any
   const { pluginId } = (req.body || {}) as any
   if (!pluginId) return reply.code(400).send({ ok: false, error: 'PLUGIN_REQUIRED' })
   const server = store.db.servers.find((s) => s.id === id)
   if (!server) return reply.code(404).send({ ok: false, error: 'SERVER_NOT_FOUND' })
+  const acc = serverAccess(user, server, store)
+  if (!acc.ok || !acc.permissions.files) return reply.code(403).send({ ok: false, error: 'FORBIDDEN' })
   if (!(server.blueprintId === 'bp-minecraft' || server.blueprintId === 'bp-paper')) {
     return reply.code(400).send({ ok: false, error: 'NOT_A_MINECRAFT_SERVER' })
   }
@@ -1672,7 +1795,16 @@ function withRelations(s: any, user?: any) {
   // are admin-only — customers never see internal node plumbing. The full node
   // row is exposed only to admins via nodeInternal.
   const nodeView = node ? { id: node.id, host: node.host, ...(isAdmin ? { name: node.name } : {}) } : null
-  return { ...s, node: nodeView, blueprint: bp, permissions: acc.permissions, role: yourRole(user, s) }
+  const { sftpPassword, ...safe } = s
+  return {
+    ...safe,
+    primaryAllocationId: s.primaryAllocationId ?? s.allocations?.[0]?.id ?? null,
+    antiddos: s.antiddos || { enabled: false, level: 'standard' },
+    node: nodeView,
+    blueprint: bp,
+    permissions: acc.permissions,
+    role: yourRole(user, s),
+  }
 }
 
 // Non-admin users only see servers they have been granted access to (or own).
@@ -1718,7 +1850,7 @@ app.post('/api/servers', async (req, reply) => {
   const user = me(req)
   if (!user) return reply.code(401).send({ ok: false, error: 'UNAUTHENTICATED' })
   if (!can(user, 'modify')) return reply.code(403).send({ ok: false, error: 'FORBIDDEN' })
-  const { name, blueprintId, nodeId, memoryMb, cpuPercent, storageGb, extraEnv } = (req.body || {}) as any
+  const { name, blueprintId, nodeId, memoryMb, cpuPercent, storageGb, extraEnv, maxBackups, maxAllocations } = (req.body || {}) as any
   const node = store.db.nodes.find((n) => n.id === nodeId)
   const bp = store.db.blueprints.find((b) => b.id === blueprintId)
   if (!node) return reply.code(400).send({ ok: false, error: 'NODE_REQUIRED' })
@@ -1764,20 +1896,30 @@ app.post('/api/servers', async (req, reply) => {
     storageGb: storageGb || bp.recommendedStorageGb,
     extraEnv: extraEnv || {},
     ...mcDefaults,
+    // Per-server quotas set by the admin at creation time: backup limit comes
+    // from the node default when not overridden; allocation limit defaults to
+    // 1 port (most servers need exactly one connect address).
+    maxBackups: validLim(toInt(maxBackups), 1, 100) || (node.serverLimits?.maxBackups ?? 1),
+    maxAllocations: validLim(toInt(maxAllocations), 1, 100) ?? 1,
     // Allocate from the node's manual pool (Allocations tab) when it has
     // enough free ports; otherwise fall back to the node's raw port range or
-    // blueprint fixed ports. The pool never auto-expands.
+    // blueprint fixed ports. The pool never auto-expands. Never hands out more
+    // ports than the server's maxAllocations quota.
     allocations: (() => {
-      const pool = allocateFromNodePool(node, bp.ports.length)
+      const want = Math.min(bp.ports.length, validLim(toInt(maxAllocations), 1, 100) ?? 1)
+      const pool = allocateFromNodePool(node, want)
       if (pool) return pool
       return (node.portRangeStart && node.portRangeEnd)
-        ? allocatePorts(node, bp.ports.length)
-        : bp.ports.map((p: number) => ({ id: nanoid(8), port: p, proto: 'tcp' }))
+        ? allocatePorts(node, want)
+        : bp.ports.slice(0, want).map((p: number) => ({ id: nanoid(8), port: p, proto: 'tcp' }))
     })(),
     createdAt: Date.now(),
     installed: false,
     startedAt: null,
+    antiddos: { enabled: false, level: 'standard' },
   }
+  // The first allocation is the address players connect to until it is changed.
+  server.primaryAllocationId = server.allocations[0]?.id || null
   store.db.servers.push(server)
   store.persist()
 
@@ -1889,6 +2031,12 @@ app.post('/api/servers/:id/power', async (req, reply) => {
   pushTerminal(id, `[control] ${action} requested`)
   try {
     if (action === 'start') {
+      // Minecraft servers get their built-in RCON listener enabled before
+      // boot (patches server.properties in place; safe while stopped). The
+      // Player Management Center uses it for live queries + commands.
+      if (server.blueprintId === 'bp-minecraft' || server.blueprintId === 'bp-paper') {
+        try { await client.ensureRCON(server.id) } catch { /* best-effort */ }
+      }
       try {
         await client.power(server.id, 'start')
       } catch (startErr: any) {
@@ -1942,6 +2090,8 @@ app.delete('/api/servers/:id', async (req, reply) => {
         try { await client.closeFirewall(server.id, a.port) } catch { /* best-effort */ }
       }
     }
+    // Best-effort: drop any host anti-DDoS filter rules owned by this server.
+    try { await client.setAntiDdos(server.id, { enabled: false, ports: [], level: 'standard' }) } catch { /* best-effort */ }
     try { await client.remove(server.id) } catch { /* best-effort */ }
   }
   store.db.servers = store.db.servers.filter((s) => s.id !== id)
@@ -1963,6 +2113,12 @@ app.post('/api/servers/:id/allocations', async (req, reply) => {
   if (!server) return reply.code(404).send({ ok: false, error: 'SERVER_NOT_FOUND' })
   const node = store.db.nodes.find((n) => n.id === server.nodeId)
   if (!node) return reply.code(404).send({ ok: false, error: 'NODE_NOT_FOUND' })
+
+  const allocLimit = server.maxAllocations ?? 1
+  const current = (server.allocations || []).length
+  if (current >= allocLimit) {
+    return reply.code(409).send({ ok: false, error: 'ALLOCATION_LIMIT', detail: `This server allows ${allocLimit} allocation${allocLimit === 1 ? '' : 's'}.` })
+  }
 
   const used = new Set<number>()
   for (const s of store.db.servers) {
@@ -1993,14 +2149,22 @@ app.post('/api/servers/:id/allocations', async (req, reply) => {
     return reply.code(400).send({ ok: false, error: 'PORT_OR_ALLOCATION_REQUIRED' })
   }
 
+  // Backfill for servers created before primary allocations existed: the
+  // first allocation stays primary; otherwise keep whatever was stored.
+  const prevPrimary = server.primaryAllocationId || server.allocations?.[0]?.id || null
   server.allocations = server.allocations || []
   server.allocations.push({ ...alloc, proto: alloc.proto || 'tcp' })
+  if (!server.primaryAllocationId) server.primaryAllocationId = prevPrimary || alloc.id
   store.persist()
 
   // Open the host firewall for the new port so external traffic can reach it.
   const client = agentFor(node)
   if (client) {
     try { await client.openFirewall(server.id, alloc.port) } catch (e: any) { /* best-effort */ }
+    // If anti-DDoS is on, extend the filter rules to cover the new port.
+    if (server.antiddos?.enabled) {
+      try { await syncAntiDdos(server, client) } catch { /* best-effort */ }
+    }
   }
 
   broadcastServer(`srv:${id}`, server, user)
@@ -2023,18 +2187,187 @@ app.delete('/api/servers/:id/allocations/:allocId', async (req, reply) => {
     return reply.code(400).send({ ok: false, error: 'LAST_ALLOCATION', detail: 'A server must keep at least one port.' })
   }
   server.allocations = server.allocations.filter((a: any) => a.id !== allocId)
+  // Reflow an effective primary (allocation[0] default) onto a new owner.
+  if ((server.primaryAllocationId || server.allocations[0]?.id) === allocId) {
+    server.primaryAllocationId = server.allocations[0]?.id || null
+  }
   store.persist()
 
   const node = store.db.nodes.find((n) => n.id === server.nodeId)
   const client = node ? agentFor(node) : null
   if (client && typeof alloc.port === 'number') {
     try { await client.closeFirewall(server.id, alloc.port) } catch { /* best-effort */ }
+    // If anti-DDoS is on, shrink the filter rules to the remaining ports.
+    if (server.antiddos?.enabled) {
+      try { await syncAntiDdos(server, client) } catch { /* best-effort */ }
+    }
   }
 
   broadcastServer(`srv:${id}`, server, user)
   activity(user, 'server', 'info', `Removed port ${alloc.port} from ${server.name}`, { serverId: id })
   audit(store, user.name, 'REMOVE_ALLOCATION', `${server.name}:-${alloc.port}`)
   return { ok: true, allocations: server.allocations, server: withRelations(server) }
+})
+
+// Apply the server's stored anti-DDoS intent to the node agent. Enabled
+// servers send their current allocated ports; disabled/absent state turns any
+// existing filter rules off.
+async function syncAntiDdos(server: any, client: AgentClient) {
+  const cfg = server.antiddos || {}
+  const enabled = !!cfg.enabled
+  const ports = enabled
+    ? (server.allocations || []).map((a: any) => a.port).filter((p: any) => typeof p === 'number')
+    : []
+  await client.setAntiDdos(server.id, { enabled, ports, level: cfg.level === 'strict' ? 'strict' : 'standard' })
+}
+
+// Anti-DDoS protection status. The panel's stored intent is authoritative for
+// the user-facing state; the agent is probed for what is actually applied.
+app.get('/api/servers/:id/antiddos', async (req, reply) => {
+  const user = me(req)
+  if (!user) return reply.code(401).send({ ok: false, error: 'UNAUTHENTICATED' })
+  const { id } = req.params as any
+  const server = store.db.servers.find((s) => s.id === id)
+  if (!server) return reply.code(404).send({ ok: false, error: 'SERVER_NOT_FOUND' })
+  if (!serverAccess(user, server, store).ok) return reply.code(403).send({ ok: false, error: 'FORBIDDEN' })
+
+  const local = server.antiddos || { enabled: false, level: 'standard', error: undefined }
+  const node = store.db.nodes.find((n) => n.id === server.nodeId)
+  const client = node ? agentFor(node) : null
+  let applied: { enabled: boolean; ports: number[] } | undefined
+  if (client) {
+    try { applied = (await client.antiDdosStatus(server.id)) as any } catch { /* node offline */ }
+  }
+  return { ok: true, antiddos: { ...local, applied } }
+})
+
+// Enable/disable (or retune) a server's anti-DDoS protection. Filter thresholds
+// live on the node agent; only the intent + level is stored panel-side.
+app.post('/api/servers/:id/antiddos', async (req, reply) => {
+  const user = me(req)
+  if (!user) return reply.code(401).send({ ok: false, error: 'UNAUTHENTICATED' })
+  const { id } = req.params as any
+  const { enabled, level } = (req.body || {}) as any
+  const server = store.db.servers.find((s) => s.id === id)
+  if (!server) return reply.code(404).send({ ok: false, error: 'SERVER_NOT_FOUND' })
+  const acc = serverAccess(user, server, store)
+  if (!acc.ok || !acc.permissions.files) return reply.code(403).send({ ok: false, error: 'FORBIDDEN' })
+  const node = store.db.nodes.find((n) => n.id === server.nodeId)
+  const client = agentFor(node)
+  if (!client) return reply.code(409).send({ ok: false, error: 'NODE_UNREACHABLE' })
+
+  server.antiddos = {
+    enabled: enabled === true,
+    level: level === 'strict' ? 'strict' : 'standard',
+    error: undefined,
+    updatedAt: Date.now(),
+  }
+  store.persist()
+  try {
+    await syncAntiDdos(server, client)
+  } catch (e: any) {
+    server.antiddos.error = String(e?.message || e)
+    store.persist()
+    broadcastServer(`srv:${id}`, server, user)
+    return reply.code(502).send({ ok: false, error: 'ANTIDDOS_APPLY_FAILED', message: server.antiddos.error })
+  }
+  broadcastServer(`srv:${id}`, server, user)
+  activity(user, 'server', 'info', `${enabled ? 'Enabled' : 'Disabled'} anti-DDoS protection on ${server.name} (${server.antiddos.level})`, { serverId: id })
+  audit(store, user.name, enabled ? 'ENABLE_ANTIDDOS' : 'DISABLE_ANTIDDOS', `server:${server.name} level:${server.antiddos.level}`)
+  return { ok: true, antiddos: server.antiddos, server: withRelations(server) }
+})
+
+// ---------------------------------------------------------------------------
+// Player Management Center — live player state + in-game actions for
+// Minecraft servers. Powered by the node agent, which reads the server's real
+// files (whitelist/ops/bans/usercache/stats/logs) and talks to the server over
+// its built-in RCON (auto-enabled by the panel before start).
+// ---------------------------------------------------------------------------
+app.get('/api/servers/:id/players', async (req, reply) => {
+  const user = me(req)
+  if (!user) return reply.code(401).send({ ok: false, error: 'UNAUTHENTICATED' })
+  const { id } = req.params as any
+  const server = store.db.servers.find((s) => s.id === id)
+  if (!server) return reply.code(404).send({ ok: false, error: 'SERVER_NOT_FOUND' })
+  const acc = serverAccess(user, server, store)
+  if (!acc.ok || !acc.permissions.command) return reply.code(403).send({ ok: false, error: 'FORBIDDEN' })
+  const node = store.db.nodes.find((n) => n.id === server.nodeId)
+  const client = node ? agentFor(node) : null
+  if (!client) return reply.code(409).send({ ok: false, error: 'NODE_UNREACHABLE' })
+
+  let snap: any = { rcon: { enabled: false, reason: 'node offline?' }, online: [], whitelist: [], ops: [], banned: [], known: [], playtime: {}, firstJoin: {}, lastJoin: {}, onlineAt: {}, players: {} }
+  try {
+    snap = (await client.players(id)) as any
+  } catch {
+    // Node unreachable — fall back to persisted records only.
+  }
+
+  // Merge with the panel's persistent per-server player records so join
+  // history survives log rotation and servers that are currently offline.
+  const recs = (store.db.playerRecords || []).filter((r: any) => r.serverId === id)
+  const merged: any = {
+    rcon: snap.rcon,
+    online: snap.online || [],
+    whitelist: snap.whitelist || [],
+    ops: snap.ops || [],
+    banned: snap.banned || [],
+    known: (snap.known || []).map((p: any) => {
+      const r = recs.find((x: any) => x.uuid === p.uuid)
+      return {
+        name: p.name,
+        uuid: p.uuid,
+        online: (snap.online || []).some((n: string) => n.toLowerCase() === p.name.toLowerCase()),
+        playtimeTicks: snap.playtime?.[p.uuid] ?? r?.playtimeTicks ?? 0,
+        firstJoined: snap.firstJoin?.[p.uuid] || r?.firstJoined || null,
+        lastJoined: snap.lastJoin?.[p.uuid] || r?.lastJoined || null,
+        lastSeenAt: snap.onlineAt?.[p.uuid] || r?.lastSeenAt || null,
+      }
+    }),
+  }
+  return { ok: true, players: merged }
+})
+
+// Run an in-game management action over RCON (kick/ban/pardon/whitelist/op/…).
+app.post('/api/servers/:id/players/action', async (req, reply) => {
+  const user = me(req)
+  if (!user) return reply.code(401).send({ ok: false, error: 'UNAUTHENTICATED' })
+  const { id } = req.params as any
+  const { player, action, args } = (req.body || {}) as any
+  if (!player || !action) return reply.code(400).send({ ok: false, error: 'PLAYER_AND_ACTION_REQUIRED' })
+  const server = store.db.servers.find((s) => s.id === id)
+  if (!server) return reply.code(404).send({ ok: false, error: 'SERVER_NOT_FOUND' })
+  const acc = serverAccess(user, server, store)
+  if (!acc.ok || !acc.permissions.command) return reply.code(403).send({ ok: false, error: 'FORBIDDEN' })
+  const node = store.db.nodes.find((n) => n.id === server.nodeId)
+  const client = node ? agentFor(node) : null
+  if (!client) return reply.code(409).send({ ok: false, error: 'NODE_UNREACHABLE' })
+  const res = await client.playerAction(id, { player, action, args: args || [] })
+  activity(user, 'server', 'info', `${action} → ${player} on ${server.name}`, { serverId: id })
+  audit(store, user.name, 'PLAYER_ACTION', `${action}:${player} server:${server.name}`)
+  return { ok: true, ...(res as any) }
+})
+
+// Set which allocation is the server's "primary" — the address players connect
+// to (shown in the server header and advertisements). Any collaborator with
+// file access can pick it; extra allocations stay freely usable for plugins
+// (e.g. a GeyserMC Bedrock listener on its own UDP port).
+app.post('/api/servers/:id/allocations/:allocId/primary', async (req, reply) => {
+  const user = me(req)
+  if (!user) return reply.code(401).send({ ok: false, error: 'UNAUTHENTICATED' })
+  const { id, allocId } = req.params as any
+  const server = store.db.servers.find((s) => s.id === id)
+  if (!server) return reply.code(404).send({ ok: false, error: 'SERVER_NOT_FOUND' })
+  const acc = serverAccess(user, server, store)
+  if (!acc.ok || !acc.permissions.files) return reply.code(403).send({ ok: false, error: 'FORBIDDEN' })
+  const alloc = (server.allocations || []).find((a: any) => a.id === allocId)
+  if (!alloc) return reply.code(404).send({ ok: false, error: 'ALLOCATION_NOT_FOUND' })
+
+  server.primaryAllocationId = allocId
+  store.persist()
+  broadcastServer(`srv:${id}`, server, user)
+  activity(user, 'server', 'info', `Set primary allocation for ${server.name} to ${alloc.port}`, { serverId: id })
+  audit(store, user.name, 'SET_PRIMARY_ALLOCATION', `server:${server.name} port:${alloc.port}`)
+  return { ok: true, primaryAllocationId: allocId, server: withRelations(server) }
 })
 
 // Reconcile server live state from the node agent's Docker.
@@ -2118,6 +2451,35 @@ app.get('/api/servers/:id/logs', async (req) => {
   const { output } = await client.containerLogs(server.id, 200)
   return { ok: true, output }
 })
+
+// ---------------------------------------------------------------------------
+// SFTP access — per-server credentials the user plugs into any SFTP client.
+// Credentials are generated lazily and only ever returned by these routes.
+// ---------------------------------------------------------------------------
+const fetchSftp = async (req: any, reply: any, rotate: boolean) => {
+  const user = me(req)
+  if (!user) return reply.code(401).send({ ok: false, error: 'UNAUTHENTICATED' })
+  const { id } = req.params as any
+  const found = findServer(user, id)
+  if ('error' in found) return reply.code(found.status).send({ ok: false, error: found.error })
+  const server = found.server
+  const acc = serverAccess(user, server, store)
+  if (!acc.permissions.files) return reply.code(403).send({ ok: false, error: 'FORBIDDEN' })
+  const node = store.db.nodes.find((n) => n.id === server.nodeId)
+  if (!node) return reply.code(404).send({ ok: false, error: 'NODE_NOT_FOUND' })
+  const port = sftpPortFor(node)
+  if (port < 1 || port > 65535) return reply.code(400).send({ ok: false, error: 'SFTP_NOT_CONFIGURED' })
+  const password = serverSftpPassword(server, rotate)
+  const creds = { host: node.host, port, username: server.id, password }
+  if (rotate) {
+    audit(store, user.name, 'ROTATE_SFTP_PASSWORD', `server:${server.name}`)
+    activity(user, 'server', 'info', `Rotated SFTP password for ${server.name}`, { serverId: server.id })
+  }
+  return { ok: true, sftp: creds }
+}
+
+app.get('/api/servers/:id/sftp', async (req, reply) => fetchSftp(req, reply, false))
+app.post('/api/servers/:id/sftp/rotate', async (req, reply) => fetchSftp(req, reply, true))
 
 // ---------------------------------------------------------------------------
 // Files (forwarded to the node agent)
@@ -2336,45 +2698,19 @@ app.get('/api/servers/:id/files/download', async (req, reply) => {
 // ---------------------------------------------------------------------------
 // Backups — real ZIP archives created/extracted by the node agent
 // ---------------------------------------------------------------------------
-app.get('/api/servers/:id/backups', async (req, reply) => {
-  const user = me(req)
-  if (!user) return { ok: false, error: 'UNAUTHENTICATED' }
-  const { id } = req.params as any
-  const server = store.db.servers.find((s) => s.id === id)
-  if (!server) return reply.code(404).send({ ok: false, error: 'SERVER_NOT_FOUND' })
-  if (!serverAccess(user, server, store).ok) return reply.code(403).send({ ok: false, error: 'FORBIDDEN' })
-  return { ok: true, backups: store.db.backups.filter((b) => b.serverId === id) }
-})
-
-app.post('/api/servers/:id/backups', async (req, reply) => {
-  const user = me(req)
-  if (!user) return reply.code(401).send({ ok: false, error: 'UNAUTHENTICATED' })
-  if (!can(user, 'modify')) return reply.code(403).send({ ok: false, error: 'FORBIDDEN' })
-  const { id } = req.params as any
-  const { name } = (req.body || {}) as any
-  const server = store.db.servers.find((s) => s.id === id)
-  if (!server) return reply.code(404).send({ ok: false, error: 'SERVER_NOT_FOUND' })
+// Create a backup record + kick off the node agent archive job. Fire-and-forget
+// on the actual archiving; the record is returned immediately. Used by both the
+// manual POST /backups route and the auto-backup ticker.
+async function performBackup(server: any, user: any, opts: { name?: string; isAuto?: boolean } = {}): Promise<any> {
   const node = store.db.nodes.find((n) => n.id === server.nodeId)
-  const client = agentFor(node)
-  if (!client) return reply.code(409).send({ ok: false, error: 'NODE_UNREACHABLE' })
-
+  const client = node ? agentFor(node) : null
+  if (!client) throw Object.assign(new Error('NODE_UNREACHABLE'), { code: 409 })
   const uuid = nanoid(10)
   const file = `${uuid}.zip`
-  const backup: {
-    id: string
-    serverId: string
-    name: string
-    uuid: string
-    file: string
-    sizeBytes: number
-    status: string
-    createdAt: number
-    completedAt: number | null
-    error: string | null
-  } = {
+  const backup: { id: string; serverId: string; name: string; uuid: string; file: string; sizeBytes: number; status: string; createdAt: number; completedAt: number | null; error: string | null } = {
     id: nanoid(10),
-    serverId: id,
-    name: name || `Backup ${new Date().toLocaleString()}`,
+    serverId: server.id,
+    name: opts.name || `Backup ${new Date().toLocaleString()}`,
     uuid,
     file,
     sizeBytes: 0,
@@ -2385,31 +2721,118 @@ app.post('/api/servers/:id/backups', async (req, reply) => {
   }
   store.db.backups.unshift(backup)
   store.persist()
-  hub.to(`srv:${id}`, { type: 'backup-progress', data: { backupId: backup.id, status: 'running', pct: 5 } })
-  pushTerminal(id, `[backup] starting ${backup.name}`)
-
-  // fire-and-forget: agent creates the archive and returns its real size.
+  hub.to(`srv:${server.id}`, { type: 'backup-progress', data: { backupId: backup.id, status: 'running', pct: 5 } })
+  pushTerminal(server.id, `[backup] starting ${backup.name}`)
   ;(async () => {
     try {
       const res = await client.createBackup(server.id, file, uuid)
       backup.status = 'completed'
       backup.completedAt = Date.now()
       backup.sizeBytes = Number(res?.bytes || 0)
-      hub.to(`srv:${id}`, { type: 'backup-progress', data: { backupId: backup.id, status: 'completed', pct: 100 } })
-      pushTerminal(id, `[backup] ${backup.name} completed (${fmtBytes(backup.sizeBytes)})`, 'info')
-      activity(user, 'server', 'info', `Backed up ${server.name}`, { serverId: id })
-      audit(store, user.name, 'CREATE_BACKUP', `backup:${backup.name}`)
+      hub.to(`srv:${server.id}`, { type: 'backup-progress', data: { backupId: backup.id, status: 'completed', pct: 100 } })
+      pushTerminal(server.id, `[backup] ${backup.name} completed (${fmtBytes(backup.sizeBytes)})`, 'info')
+      if (user) activity(user, 'server', 'info', `Backed up ${server.name}`, { serverId: server.id })
+      audit(store, (user && user.name) || 'system', 'CREATE_BACKUP', `backup:${backup.name}`)
+      if (opts.isAuto && server.autoBackup) {
+        server.autoBackup.lastAt = Date.now()
+        server.autoBackup.lastStatus = 'ok'
+        await pruneAutoBackups(server, client)
+      }
     } catch (e: any) {
       backup.status = 'failed'
       backup.error = String(e?.message || e)
-      hub.to(`srv:${id}`, { type: 'backup-progress', data: { backupId: backup.id, status: 'failed', pct: 0 } })
-      pushTerminal(id, `[backup] ${backup.name} failed: ${backup.error}`, 'error')
+      hub.to(`srv:${server.id}`, { type: 'backup-progress', data: { backupId: backup.id, status: 'failed', pct: 0 } })
+      pushTerminal(server.id, `[backup] ${backup.name} failed: ${backup.error}`, 'error')
+      if (opts.isAuto && server.autoBackup) server.autoBackup.lastStatus = 'failed'
     }
     store.persist()
-    broadcastServer(`srv:${id}`, server, user)
+    broadcastServer(`srv:${server.id}`, server, user)
   })()
+  return backup
+}
 
+// Drop the oldest completed backups beyond the configured retention, and never
+// exceed the admin-set per-server backup quota (maxBackups).
+async function pruneAutoBackups(server: any, client: any) {
+  const ab = server.autoBackup
+  const cap = Math.min(ab?.retention ?? 10, server.maxBackups ?? (ab?.retention ?? 10))
+  const list = store.db.backups
+    .filter((b: any) => b.serverId === server.id && b.status === 'completed')
+    .sort((a: any, b: any) => a.createdAt - b.createdAt)
+  while (list.length > cap) {
+    const oldest = list.shift()
+    try { await client.deleteBackup(server.id, oldest.file) } catch { /* best-effort */ }
+    audit(store, 'system', 'DELETE_BACKUP', `auto-prune backup:${oldest.name}`)
+    store.db.backups = store.db.backups.filter((b: any) => b.id !== oldest.id)
+  }
+  store.persist()
+}
+
+app.get('/api/servers/:id/backups', async (req, reply) => {
+  const user = me(req)
+  if (!user) return { ok: false, error: 'UNAUTHENTICATED' }
+  const { id } = req.params as any
+  const server = store.db.servers.find((s) => s.id === id)
+  if (!server) return reply.code(404).send({ ok: false, error: 'SERVER_NOT_FOUND' })
+  if (!serverAccess(user, server, store).ok) return reply.code(403).send({ ok: false, error: 'FORBIDDEN' })
+  return { ok: true, backups: store.db.backups.filter((b) => b.serverId === id), autoBackup: server.autoBackup || { enabled: false, intervalHours: 24, retention: 10, nextAt: null, lastAt: null, lastStatus: null } }
+})
+
+app.post('/api/servers/:id/backups', async (req, reply) => {
+  const user = me(req)
+  if (!user) return reply.code(401).send({ ok: false, error: 'UNAUTHENTICATED' })
+  const { id } = req.params as any
+  const { name } = (req.body || {}) as any
+  const server = store.db.servers.find((s) => s.id === id)
+  if (!server) return reply.code(404).send({ ok: false, error: 'SERVER_NOT_FOUND' })
+  const acc = serverAccess(user, server, store)
+  if (!acc.ok || !acc.permissions.files) return reply.code(403).send({ ok: false, error: 'FORBIDDEN' })
+  const node = store.db.nodes.find((n) => n.id === server.nodeId)
+  const client = node ? agentFor(node) : null
+  if (!client) return reply.code(409).send({ ok: false, error: 'NODE_UNREACHABLE' })
+  const active = store.db.backups.filter((b: any) => b.serverId === id && b.status !== 'failed')
+  const limit = server.maxBackups ?? (node.serverLimits?.maxBackups ?? 1)
+  if (active.length >= limit) {
+    return reply.code(409).send({ ok: false, error: 'BACKUP_LIMIT', detail: `This server allows ${limit} backup${limit === 1 ? '' : 's'}. Delete one before creating another.` })
+  }
+  const backup = await performBackup(server, user, { name })
   return reply.code(201).send({ ok: true, backup })
+})
+
+// Auto-backup settings for a server (per-server: interval + retention). The
+// background ticker owns creating backups when they fall due.
+app.get('/api/servers/:id/backups/auto', async (req, reply) => {
+  const user = me(req)
+  if (!user) return reply.code(401).send({ ok: false, error: 'UNAUTHENTICATED' })
+  const { id } = req.params as any
+  const server = store.db.servers.find((s) => s.id === id)
+  if (!server) return reply.code(404).send({ ok: false, error: 'SERVER_NOT_FOUND' })
+  if (!serverAccess(user, server, store).ok) return reply.code(403).send({ ok: false, error: 'FORBIDDEN' })
+  return { ok: true, autoBackup: server.autoBackup || { enabled: false, intervalHours: 24, retention: 10, nextAt: null, lastAt: null, lastStatus: null } }
+})
+
+app.post('/api/servers/:id/backups/auto', async (req, reply) => {
+  const user = me(req)
+  if (!user) return reply.code(401).send({ ok: false, error: 'UNAUTHENTICATED' })
+  const { id } = req.params as any
+  const { enabled, intervalHours, retention } = (req.body || {}) as any
+  const server = store.db.servers.find((s) => s.id === id)
+  if (!server) return reply.code(404).send({ ok: false, error: 'SERVER_NOT_FOUND' })
+  const acc = serverAccess(user, server, store)
+  if (!acc.ok || !acc.permissions.files) return reply.code(403).send({ ok: false, error: 'FORBIDDEN' })
+  const cur = server.autoBackup || { enabled: false, intervalHours: 24, retention: 10, nextAt: null, lastAt: null, lastStatus: null }
+  const hours = Math.min(720, Math.max(1, Number(intervalHours) || 24))
+  const keep = Math.min(100, Math.max(1, Number(retention) || 10))
+  server.autoBackup = {
+    ...cur,
+    enabled: !!enabled,
+    intervalHours: hours,
+    retention: keep,
+    nextAt: enabled ? (cur.nextAt && cur.nextAt > Date.now() ? cur.nextAt : Date.now() + hours * 3600 * 1000) : null,
+  }
+  store.persist()
+  audit(store, user.name, 'SET_AUTO_BACKUP', `server:${server.name} enabled:${server.autoBackup.enabled} every:${hours}h keep:${keep}`)
+  return { ok: true, autoBackup: server.autoBackup }
 })
 
 app.get('/api/servers/:id/backups/:bid/download', async (req, reply) => {
@@ -2435,12 +2858,12 @@ app.get('/api/servers/:id/backups/:bid/download', async (req, reply) => {
 app.post('/api/servers/:id/backups/:bid/restore', async (req, reply) => {
   const user = me(req)
   if (!user) return reply.code(401).send({ ok: false, error: 'UNAUTHENTICATED' })
-  if (!can(user, 'modify')) return reply.code(403).send({ ok: false, error: 'FORBIDDEN' })
   const { id, bid } = req.params as any
   const backup = store.db.backups.find((b) => b.id === bid && b.serverId === id)
   if (!backup) return reply.code(404).send({ ok: false, error: 'BACKUP_NOT_FOUND' })
   const server = store.db.servers.find((s) => s.id === id)!
-  if (!serverAccess(user, server, store).ok) return reply.code(403).send({ ok: false, error: 'FORBIDDEN' })
+  const acc = serverAccess(user, server, store)
+  if (!acc.ok || !acc.permissions.files) return reply.code(403).send({ ok: false, error: 'FORBIDDEN' })
   const client = agentFor(store.db.nodes.find((n) => n.id === server.nodeId))
   if (!client) return reply.code(409).send({ ok: false, error: 'NODE_UNREACHABLE' })
   pushTerminal(id, `[restore] extracting ${backup.name} ...`, 'info')
@@ -2459,11 +2882,12 @@ app.post('/api/servers/:id/backups/:bid/restore', async (req, reply) => {
 app.delete('/api/servers/:id/backups/:bid', async (req, reply) => {
   const user = me(req)
   if (!user) return reply.code(401).send({ ok: false, error: 'UNAUTHENTICATED' })
-  if (!can(user, 'modify')) return reply.code(403).send({ ok: false, error: 'FORBIDDEN' })
   const { id, bid } = req.params as any
   const backup = store.db.backups.find((b) => b.id === bid && b.serverId === id)
   if (!backup) return reply.code(404).send({ ok: false, error: 'BACKUP_NOT_FOUND' })
   const server = store.db.servers.find((s) => s.id === id)!
+  const acc = serverAccess(user, server, store)
+  if (!acc.ok || !acc.permissions.files) return reply.code(403).send({ ok: false, error: 'FORBIDDEN' })
   const client = agentFor(store.db.nodes.find((n) => n.id === server.nodeId))
   if (client) {
     try { await client.deleteBackup(server.id, backup.file) } catch { /* best-effort */ }
@@ -2539,6 +2963,70 @@ app.post('/api/servers/:id/startup', async (req, reply) => {
   audit(store, user.name, 'EDIT_CONFIG', `server:${server.name}`)
   await reconcileServers(node)
   return { ok: true, server: withRelations(server) }
+})
+
+// Admin configuration editor for existing servers: name, resources and the
+// per-server backup/allocation quotas. Re-provisions the container using the
+// canonical manifest so resource changes apply immediately.
+app.put('/api/servers/:id', async (req, reply) => {
+  const user = me(req)
+  if (!user) return reply.code(401).send({ ok: false, error: 'UNAUTHENTICATED' })
+  if (!can(user, 'modify')) return reply.code(403).send({ ok: false, error: 'FORBIDDEN' })
+  const { id } = req.params as any
+  const b = (req.body || {}) as any
+  const server = store.db.servers.find((s) => s.id === id)
+  if (!server) return reply.code(404).send({ ok: false, error: 'SERVER_NOT_FOUND' })
+  const node = store.db.nodes.find((n) => n.id === server.nodeId)
+
+  const changed: string[] = []
+  if (b.name !== undefined && String(b.name).trim()) {
+    server.name = String(b.name).trim().slice(0, 64)
+    changed.push('name')
+  }
+  const updInt = (k: string, min: number, max: number, dst: 'cpuPercent' | 'memoryLimitMb' | 'storageGb' | 'maxBackups' | 'maxAllocations') => {
+    if (b[k] === undefined) return false
+    const v = validLim(toInt(b[k]), min, max)
+    if (v === undefined) return false
+    server[dst] = v
+    return true
+  }
+  if (updInt('cpuPercent', 1, 1600, 'cpuPercent')) changed.push('cpuPercent')
+  if (updInt('memoryLimitMb', 32, 1024 * 1024, 'memoryLimitMb')) changed.push('memoryLimitMb')
+  if (updInt('storageGb', 1, 65536, 'storageGb')) changed.push('storageGb')
+  if (updInt('maxBackups', 1, 100, 'maxBackups')) changed.push('maxBackups')
+  if (updInt('maxAllocations', 1, 100, 'maxAllocations')) changed.push('maxAllocations')
+
+  // Cap allocations at the (possibly reduced) quota when it shrinks.
+  if (changed.includes('maxAllocations') || changed.includes('maxBackups')) {
+    if ((server.allocations || []).length > (server.maxAllocations ?? 1)) {
+      server.allocations = (server.allocations || []).slice(0, server.maxAllocations ?? 1)
+      changed.push('allocations-trimmed')
+    }
+  }
+
+  store.persist()
+  pushTerminal(id, `[control] updated config: ${changed.join(', ')}`, 'info')
+
+  // Re-provision the running container only when the container-relevant config
+  // changed (resources or exposed ports). A pure rename / quota change must not
+  // bounce the server.
+  const resourceFields = ['cpuPercent', 'memoryLimitMb', 'storageGb', 'allocations-trimmed']
+  const affectsContainer = changed.some((c) => resourceFields.includes(c))
+  if (node && affectsContainer) {
+    const client = agentFor(node)
+    if (client) {
+      try {
+        if (await client.exists(server.id)) {
+          await client.remove(server.id)
+          await client.createContainer(buildManifest(server))
+        }
+      } catch { /* best-effort: reconcile will re-sync */ }
+    }
+  }
+  activity(user, 'server', 'info', `Updated configuration for ${server.name}`, { serverId: id })
+  audit(store, user.name, 'EDIT_CONFIG', `${server.name}: ${changed.join(', ')}`)
+  await reconcileServers(node)
+  return { ok: true, server: withRelations(server), changed }
 })
 
 // ---------------------------------------------------------------------------
@@ -2783,6 +3271,71 @@ async function runSchedule(schedule: any, user: any) {
   }
 }
 
+// AIBro — user API keys + natural-language server management.
+app.get('/api/aibro', async (req, reply) => {
+  const user = me(req)
+  if (!user) return reply.code(401).send({ ok: false, error: 'UNAUTHENTICATED' })
+  return {
+    ok: true,
+    providers: AIBRO_PROVIDERS.map((p) => ({ id: p.id, label: p.label, maxKeys: p.maxKeys, keyCount: aibroKeysFor(user, p.id).length })),
+    keys: AIBRO_PROVIDERS.map((p) => ({ provider: p.id, keys: aibroKeysFor(user, p.id).map((k) => ({ id: k.id, label: k.label, masked: maskApiKey(k.key), createdAt: k.createdAt })) })).filter((r) => r.keys.length > 0),
+  }
+})
+
+app.post('/api/aibro/keys', async (req, reply) => {
+  const user = me(req)
+  if (!user) return reply.code(401).send({ ok: false, error: 'UNAUTHENTICATED' })
+  const { provider, label, key } = (req.body || {}) as any
+  try {
+    const added = aibroAddKey(user, provider, label, key)
+    store.persist()
+    return reply.code(201).send({ ok: true, key: { id: added.id, label: added.label, masked: maskApiKey(added.key), createdAt: added.createdAt } })
+  } catch (e: any) {
+    const clientErr = e?.kind === 'client'
+    return reply.code(clientErr ? 400 : 500).send({ ok: false, error: String(e?.message || e), detail: e?.detail })
+  }
+})
+
+app.delete('/api/aibro/keys/:keyId', async (req, reply) => {
+  const user = me(req)
+  if (!user) return reply.code(401).send({ ok: false, error: 'UNAUTHENTICATED' })
+  const { keyId } = req.params as any
+  const ok = aibroRemoveKey(user, keyId)
+  if (!ok) return reply.code(404).send({ ok: false, error: 'KEY_NOT_FOUND' })
+  store.persist()
+  return { ok: true }
+})
+
+app.post('/api/aibro/chat', async (req, reply) => {
+  const user = me(req)
+  if (!user) return reply.code(401).send({ ok: false, error: 'UNAUTHENTICATED' })
+  const { message, provider } = (req.body || {}) as any
+  if (!message || !String(message).trim()) return reply.code(400).send({ ok: false, error: 'EMPTY_MESSAGE' })
+  try {
+    const out = await aibroChat({
+      store,
+      serverAccess,
+      withRelations,
+      broadcastServer,
+      pushTerminal,
+      activity,
+      audit,
+      canTransition,
+      performBackup,
+      agentFor,
+    }, user, String(message).trim(), provider)
+    activity(user, 'server', 'info', `AIBro: ${String(message).trim().slice(0, 120)}`, { provider: out.provider || provider })
+    return { ...out, ok: true }
+  } catch (e: any) {
+    return reply.code(e?.kind === 'client' ? 400 : 502).send({ ok: false, error: String(e?.message || e), detail: e?.detail })
+  }
+})
+
+function maskApiKey(k: string): string {
+  if (!k || k.length <= 8) return '****'
+  return `${k.slice(0, 3)}…${k.slice(-4)}`
+}
+
 // Background cron ticker — every 10s check due schedules (per-minute granularity).
 setInterval(() => {
   for (const schedule of store.db.schedules) {
@@ -2790,6 +3343,25 @@ setInterval(() => {
     if (schedule.nextRunAt && Date.now() >= schedule.nextRunAt) {
       runSchedule(schedule, null)
     }
+  }
+
+  // Auto-backups: create a backup for any server whose interval has come due.
+  // Per-server retention pruning runs after each completed backup.
+  const now = Date.now()
+  for (const server of store.db.servers) {
+    const ab = server.autoBackup
+    if (!ab || !ab.enabled || !ab.nextAt || now < ab.nextAt) continue
+    ab.nextAt = now + (ab.intervalHours || 24) * 3600 * 1000
+    server.autoBackup.lastStatus = 'running'
+    store.persist()
+    const node = store.db.nodes.find((n) => n.id === server.nodeId)
+    const client = node ? agentFor(node) : null
+    if (!client) {
+      server.autoBackup.lastStatus = 'skipped-unreachable'
+      store.persist()
+      continue
+    }
+    performBackup(server, null, { isAuto: true, name: `Auto backup · ${new Date().toLocaleString()}` }).catch(() => {})
   }
 }, 10000)
 
@@ -2918,11 +3490,11 @@ app.get('/api/servers/:id/snapshots', async (req, reply) => {
 app.post('/api/servers/:id/snapshots', async (req, reply) => {
   const user = me(req)
   if (!user) return reply.code(401).send({ ok: false, error: 'UNAUTHENTICATED' })
-  if (!can(user, 'modify')) return reply.code(403).send({ ok: false, error: 'FORBIDDEN' })
   const { id } = req.params as any
   const server = store.db.servers.find((s) => s.id === id)
   if (!server) return reply.code(404).send({ ok: false, error: 'SERVER_NOT_FOUND' })
-  if (!serverAccess(user, server, store).ok) return reply.code(403).send({ ok: false, error: 'FORBIDDEN' })
+  const acc = serverAccess(user, server, store)
+  if (!acc.ok || !acc.permissions.snapshot) return reply.code(403).send({ ok: false, error: 'FORBIDDEN' })
   const { name } = (req.body || {}) as any
   const snap = { id: nanoid(10), serverId: id, name: name || 'Restore point', kind: 'manual' as const, sizeMb: Math.round(Math.random() * 400 + 60), createdAt: Date.now() }
   store.db.snapshots.push(snap)
@@ -2937,7 +3509,8 @@ app.post('/api/servers/:id/snapshots/:sid/restore', async (req, reply) => {
   const { id } = req.params as any
   const server = store.db.servers.find((s) => s.id === id)
   if (!server) return reply.code(404).send({ ok: false, error: 'SERVER_NOT_FOUND' })
-  if (!serverAccess(user, server, store).ok) return reply.code(403).send({ ok: false, error: 'FORBIDDEN' })
+  const acc = serverAccess(user, server, store)
+  if (!acc.ok || !acc.permissions.restore) return reply.code(403).send({ ok: false, error: 'FORBIDDEN' })
   const { sid } = req.params as any
   const snap = store.db.snapshots.find((s) => s.id === sid)
   if (!snap) return reply.code(404).send({ ok: false, error: 'SNAPSHOT_NOT_FOUND' })
@@ -2951,7 +3524,8 @@ app.delete('/api/servers/:id/snapshots/:sid', async (req, reply) => {
   const { id } = req.params as any
   const server = store.db.servers.find((s) => s.id === id)
   if (!server) return reply.code(404).send({ ok: false, error: 'SERVER_NOT_FOUND' })
-  if (!serverAccess(user, server, store).ok) return reply.code(403).send({ ok: false, error: 'FORBIDDEN' })
+  const acc = serverAccess(user, server, store)
+  if (!acc.ok || !acc.permissions.snapshot) return reply.code(403).send({ ok: false, error: 'FORBIDDEN' })
   const { sid } = req.params as any
   store.db.snapshots = store.db.snapshots.filter((s) => s.id !== sid)
   store.persist()
@@ -3105,8 +3679,8 @@ function defaultPerms(role: string): Record<string, boolean> {
   const owner: Record<string, boolean> = { view: true, command: true, files: true, snapshot: true, restore: true, access: true, admin: true }
   if (role === 'admin') return { ...owner }
   if (role === 'operator') return { ...owner, admin: false }
-  if (role === 'developer') return { view: true, command: true, files: true, snapshot: false, restore: false, access: false, admin: false }
-  return { view: true, command: false, files: false, snapshot: false, restore: false, access: false, admin: false }
+  if (role === 'developer') return { view: true, command: true, files: true, snapshot: true, restore: true, access: false, admin: false }
+  return { view: true, command: true, files: true, snapshot: true, restore: true, access: false, admin: false }
 }
 
 // ---------------------------------------------------------------------------

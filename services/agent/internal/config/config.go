@@ -22,6 +22,11 @@ type Config struct {
 	TLSKey        string // path to TLS private key when the agent listens on https
 	PollSeconds   int
 	ContainerBase string // volume mount base dir for server data
+
+	// Per-server SFTP access. UH_SFTP_ADDR is the bind address for the SSH/SFTP
+	// server, UH_SFTP_AUTH_URL is the panel endpoint that validates credentials.
+	SftpAddr    string
+	SftpAuthURL string
 }
 
 func Load() Config {
@@ -38,6 +43,8 @@ func Load() Config {
 		TLSKey:        getenv("UH_AGENT_TLS_KEY", ""),
 		PollSeconds:   atoi(getenv("UH_POLL_INTERVAL", "5")),
 		ContainerBase: getenv("UH_CONTAINER_BASE", "/tmp/uptimehost/data"),
+		SftpAddr:      getenv("UH_SFTP_ADDR", ""),
+		SftpAuthURL:   getenv("UH_SFTP_AUTH_URL", ""),
 	}
 }
 

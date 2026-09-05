@@ -415,12 +415,24 @@ def install_requirements():
     go_dir = os.path.join(REPO_DIR, "services", "agent")
     if os.path.exists(os.path.join(go_dir, "go.mod")):
         if not shutil.which("go"):
-            warn("'go' not found — skipping agent build. Install Go to build the node agent.")
+            info("Installing Go toolchain (needed to build the node agent)...")
+            if shutil.which("apt-get"):
+                sh(["sudo", "apt-get", "update"])
+                sh(["sudo", "apt-get", "install", "-y", "golang-go"])
+            elif shutil.which("dnf"):
+                sh(["sudo", "dnf", "install", "-y", "golang"])
+            elif shutil.which("yum"):
+                sh(["sudo", "yum", "install", "-y", "golang"])
+            elif shutil.which("brew"):
+                sh(["brew", "install", "go"])
+        if not shutil.which("go"):
+            warn("'go' still not found — skipping agent build. Install Go, or the panel SSH auto-install will build it on demand.")
         else:
             code, out = sh(["go", "mod", "download"], cwd=go_dir, capture=True)
             if code != 0:
                 die("go mod download failed:\n" + out)
-            code, out = sh(["go", "build", "-o", os.path.join(go_dir, "bin", "uh-agent"), "./cmd/agent"], cwd=go_dir, capture=True)
+            code, out = sh(["go", "build", "-o", os.path.join(go_dir, "bin", "uh-agent"), "./cmd/agent"],
+                           cwd=go_dir, env={"CGO_ENABLED": "0"}, capture=True)
             if code != 0:
                 die("agent build failed:\n" + out)
             info("Built node agent -> services/agent/bin/uh-agent")

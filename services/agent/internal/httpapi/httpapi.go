@@ -19,6 +19,7 @@ import (
 	"github.com/uptimehost/agent/internal/backup"
 	"github.com/uptimehost/agent/internal/console"
 	"github.com/uptimehost/agent/internal/docker"
+	"github.com/uptimehost/agent/internal/players"
 	"github.com/uptimehost/agent/internal/signing"
 )
 
@@ -33,6 +34,8 @@ type Server struct {
 }
 
 func New(dm *docker.Client, token, nodeID, base string) *Server {
+	// The players package reads server files from the same data base dir.
+	players.Base = base
 	return &Server{
 		dm:       dm,
 		hub:      console.NewHub(dm),
@@ -252,6 +255,9 @@ func (s *Server) handleServer(w http.ResponseWriter, r *http.Request, id, sub st
 			writeJSON(w, 500, map[string]any{"error": err.Error()})
 			return
 		}
+		// Best-effort: never leave orphaned DoS filter rules for a dead server.
+		_ = docker.SetAntiDdos(docker.AntiDdosConfig{ServerID: id, Enabled: false})
+		players.GuardRCONPort(false)
 		writeJSON(w, 200, map[string]any{"removed": true})
 
 	case sub == "power" && r.Method == http.MethodPost:
@@ -265,6 +271,12 @@ func (s *Server) handleServer(w http.ResponseWriter, r *http.Request, id, sub st
 		var err error
 		switch action {
 		case "start":
+			// Minecraft servers get RCON (loopback-bound) enabled before boot so
+			// the Player Management Center can query and manage players.
+			if serr := players.EnsureEnabled(filepath.Join(s.base, id)); serr != nil {
+				log.Printf("[players] ensure rcon: %v", serr)
+			}
+			players.GuardRCONPort(true)
 			err = s.dm.Start(ctx, id)
 		case "stop":
 			err = s.dm.Stop(ctx, id)
@@ -366,6 +378,105 @@ func (s *Server) handleServer(w http.ResponseWriter, r *http.Request, id, sub st
 			return
 		}
 		writeJSON(w, 200, map[string]any{"ok": true, "action": "delete", "port": body.Port})
+
+	case sub == "antiddos" && r.Method == http.MethodGet:
+		enabled, ports := docker.AntiDdosStatus(id)
+		writeJSON(w, 200, map[string]any{"ok": true, "enabled": enabled, "ports": ports})
+
+	case sub == "antiddos" && r.Method == http.MethodPost:
+		var body struct {
+			Enabled bool   `json:"enabled"`
+			Ports   []int  `json:"ports"`
+			Level   string `json:"level"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			writeJSON(w, 400, map[string]any{"error": "bad request: " + err.Error()})
+			return
+		}
+		level := docker.LevelStandard
+		if body.Level == string(docker.LevelStrict) {
+			level = docker.LevelStrict
+		}
+		if err := docker.SetAntiDdos(docker.AntiDdosConfig{
+			ServerID: id,
+			Ports:    body.Ports,
+			Enabled:  body.Enabled,
+			Level:    level,
+		}); err != nil {
+			writeJSON(w, 500, map[string]any{"error": err.Error()})
+			return
+		}
+		writeJSON(w, 200, map[string]any{"ok": true, "enabled": body.Enabled, "ports": body.Ports})
+
+	case sub == "mc-config" && r.Method == http.MethodGet:
+		vals, err := players.PropertiesSnapshot(filepath.Join(s.base, id))
+		if err != nil {
+			writeJSON(w, 404, map[string]any{"error": err.Error()})
+			return
+		}
+		writeJSON(w, 200, map[string]any{"ok": true, "properties": vals, "schema": players.EditableProps})
+
+	case sub == "mc-config" && r.Method == http.MethodPost:
+		var body struct {
+			Key   string `json:"key"`
+			Value string `json:"value"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			writeJSON(w, 400, map[string]any{"error": "bad request: " + err.Error()})
+			return
+		}
+		if err := players.SetProperty(filepath.Join(s.base, id), body.Key, body.Value); err != nil {
+			writeJSON(w, 400, map[string]any{"error": err.Error()})
+			return
+		}
+		writeJSON(w, 200, map[string]any{"ok": true, "key": body.Key, "value": body.Value})
+
+	case sub == "players" && r.Method == http.MethodGet:
+		snap, err := players.SnapshotFor(id)
+		if err != nil {
+			writeJSON(w, 500, map[string]any{"error": err.Error()})
+			return
+		}
+		writeJSON(w, 200, snap)
+
+	case sub == "players/action" && r.Method == http.MethodPost:
+		var body struct {
+			Player string   `json:"player"`
+			Action string   `json:"action"`
+			Args   []string `json:"args"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			writeJSON(w, 400, map[string]any{"error": "bad request: " + err.Error()})
+			return
+		}
+		if body.Player == "" || body.Action == "" {
+			writeJSON(w, 400, map[string]any{"error": "player and action are required"})
+			return
+		}
+		res, err := players.Action(id, body.Player, body.Action, body.Args)
+		if err != nil {
+			writeJSON(w, 500, map[string]any{"error": err.Error()})
+			return
+		}
+		writeJSON(w, 200, res)
+
+	case sub == "players/rcon" && r.Method == http.MethodPost:
+		var body struct {
+			Enabled bool `json:"enabled"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		if body.Enabled {
+			if err := players.EnsureEnabled(filepath.Join(s.base, id)); err != nil {
+				writeJSON(w, 500, map[string]any{"error": err.Error()})
+				return
+			}
+			players.GuardRCONPort(true)
+			writeOpts := players.RCONStatus{Enabled: true}
+			writeJSON(w, 200, map[string]any{"ok": true, "rcon": writeOpts})
+			return
+		}
+		players.GuardRCONPort(false)
+		writeJSON(w, 200, map[string]any{"ok": true, "rcon": map[string]any{"enabled": false}})
 
 	case sub == "reinstall" && r.Method == http.MethodPost:
 		hostRoot := filepath.Join(s.base, id)

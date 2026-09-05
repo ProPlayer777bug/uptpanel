@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { api } from '../../api/client'
 import { Icon, Spinner, toast } from '../../components/ui'
+import { useApp } from '../../state/auth'
 import type { Server } from '@uptimehost/types'
 
 interface StartupData {
@@ -43,10 +44,16 @@ function componentIfMinecraft(server: Server) {
 }
 
 export function StartupTab({ server }: { server: Server }) {
+  const { refresh } = useApp()
   const [data, setData] = useState<StartupData | null>(null)
   const [env, setEnv] = useState<Record<string, string>>({})
   const [limits, setLimits] = useState({ cpuPercent: 100, memoryLimitMb: 1024, storageGb: 5 })
   const [busy, setBusy] = useState(false)
+
+  // Server-level policies editable by admins (persisted via PUT /servers/:id).
+  const [name, setName] = useState(server.name || '')
+  const [maxBackups, setMaxBackups] = useState(String((server as any).maxBackups ?? 1))
+  const [maxAllocations, setMaxAllocations] = useState(String((server as any).maxAllocations ?? 1))
 
   const load = () => {
     api.get(`/servers/${server.id}/startup`).then((d) => {
@@ -72,7 +79,15 @@ export function StartupTab({ server }: { server: Server }) {
     for (const [k, v] of Object.entries(env)) if (k.trim() && v !== undefined) cleaned[k.trim()] = v || ''
     try {
       await api.post(`/servers/${server.id}/startup`, { extraEnv: cleaned, resourceLimits: limits })
-      toast.ok('Startup configuration saved')
+      // Keep the resource limits posted through Startup in sync with the quotas
+      // editor, then persist the name/quota changes via the server PUT editor.
+      await api.put(`/servers/${server.id}`, {
+        name: name.trim() || undefined,
+        maxBackups: Number(maxBackups) || undefined,
+        maxAllocations: Number(maxAllocations) || undefined,
+      })
+      toast.ok('Configuration saved')
+      refresh()
       load()
     } catch (e: any) { toast.err(e?.message) }
     finally { setBusy(false) }
@@ -89,7 +104,22 @@ export function StartupTab({ server }: { server: Server }) {
       </div>
 
       <div className="p-3">
-        <div className="sm text-3 mb-2">Startup command</div>
+        <div className="sm text-3 mb-2">Server name</div>
+        <input className="input" value={name} onChange={(e) => setName(e.target.value)} placeholder="Display name" />
+
+        <div className="sm text-3 mb-2 mt-4">Server policies</div>
+        <div className="grid" style={{ gridTemplateColumns: '1fr 1fr', gap: 12 }}>
+          <label>Backup limit
+            <input className="inp" type="number" min={1} max={100} value={maxBackups} onChange={(e) => setMaxBackups(e.target.value)} />
+            <span className="xs text-3">Max backups this server can hold at once (auto-backups prune to this too).</span>
+          </label>
+          <label>Allocation limit
+            <input className="inp" type="number" min={1} max={100} value={maxAllocations} onChange={(e) => setMaxAllocations(e.target.value)} />
+            <span className="xs text-3">Max ports/addresses this server may use. Most servers need 1.</span>
+          </label>
+        </div>
+
+        <div className="sm text-3 mb-2 mt-4">Startup command</div>
         <div className="term-line mono" style={{ padding: '8px 10px', borderRadius: 8, border: '1px solid var(--line)' }}>{data.startupCommand || '—'}</div>
 
         <div className="sm text-3 mb-2 mt-4">Preview (with env substituted)</div>

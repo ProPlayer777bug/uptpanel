@@ -97,7 +97,7 @@ export function OverviewTab({ server }: { server: Server }) {
                   {server.allocations.map((a) => (
                     <div key={a.id} className="alloc">
                       <span className="mono">{publicAddress(a, server.node) || `${(a as any).alias || (a as any).ip || '—'}:${a.port}`}</span>
-                      <span className="xs text-3">{a.proto}</span>
+                      <span className="xs text-3">{a.proto}{(server as any).primaryAllocationId === a.id ? ' · primary' : ''}</span>
                     </div>
                   ))}
                 </div>

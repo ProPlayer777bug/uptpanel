@@ -4,6 +4,7 @@ import { useTheme } from '../theme/useTheme'
 import { usePalette, PALETTES } from '../theme/themes'
 import { Icon } from '../components/ui'
 import { ApiKeys } from '../components/ApiKeys'
+import { AIBro } from '../components/AIBro'
 import { Shell } from '../components/Shell'
 
 export function Account({ focus }: { focus?: string }) {
@@ -88,6 +89,9 @@ export function Account({ focus }: { focus?: string }) {
             <ApiKeys kind="account" />
           </div>
         </div>
+
+        {/* AIBro — AI assistants with the user's own provider API keys */}
+        <AIBro />
       </div>
     </Shell>
   )

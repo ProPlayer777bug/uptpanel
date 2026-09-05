@@ -1,10 +1,11 @@
+import { useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useApp } from '../state/auth'
 import { useServers, useNodes, useActivity } from '../api/hooks'
 import { Icon, StatePill, Button, EmptyState, Skeleton } from '../components/ui'
 import { SparkChart } from '../components/Chart'
 import { Shell } from '../components/Shell'
-import { publicAddress } from '../utils/mask'
+import { publicAddress, primaryAllocation } from '../utils/mask'
 
 function barPct(v: number) { return Math.min(100, Math.max(0, v)) }
 
@@ -215,9 +216,10 @@ function uptime(startedAt: number | null | undefined): string {
 
 function ServerRow({ server, onNavigate }: { server: any; onNavigate: () => void }) {
   const memPct = server.memoryLimitMb ? barPct((server.memoryMb / server.memoryLimitMb) * 100) : 0
-  // Connectable address: alias when set, else node host/IP, plus port.
-  const ipPort = server.allocations?.[0]
-    ? publicAddress(server.allocations[0], server.node) || `${server.node?.host || server.node?.name || '—'}:${server.allocations[0].port}`
+  // Connectable address: the primary allocation (alias when set), else node.
+  const pa = primaryAllocation(server)
+  const ipPort = pa
+    ? publicAddress(pa, server.node) || `${server.node?.host || server.node?.name || '—'}:${pa.port}`
     : (server.node?.host || server.node?.name || '—')
 
   return (

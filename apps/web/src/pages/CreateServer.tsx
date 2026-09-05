@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useBlueprints, useNodes, usePoll } from '../api/hooks'
 import { api } from '../api/client'
@@ -6,7 +6,7 @@ import { Icon, Modal, Spinner, toast } from '../components/ui'
 import { useApp } from '../state/auth'
 import type { Blueprint, Node } from '@uptimehost/types'
 
-type Step = 'name' | 'node' | 'memory' | 'disk' | 'cpu' | 'users'
+type Step = 'name' | 'node' | 'memory' | 'disk' | 'cpu' | 'limits' | 'users'
 
 const STEPS: { key: Step; label: string }[] = [
   { key: 'name', label: 'Name' },
@@ -14,6 +14,7 @@ const STEPS: { key: Step; label: string }[] = [
   { key: 'memory', label: 'Memory' },
   { key: 'disk', label: 'Disk' },
   { key: 'cpu', label: 'CPU' },
+  { key: 'limits', label: 'Limits' },
   { key: 'users', label: 'Users' },
 ]
 
@@ -39,6 +40,19 @@ export function CreateServer({ onClose }: { onClose: () => void }) {
   const [userQuery, setUserQuery] = useState('')
   const [selectedUsers, setSelectedUsers] = useState<string[]>([])
   const [userRoles, setUserRoles] = useState<Record<string, string>>({})
+
+  // Per-server quotas: backups default from the node's policy (or 1), and the
+  // allocation count defaults to 1 port — most servers need a single address.
+  const [maxBackups, setMaxBackups] = useState('1')
+  const [maxAllocations, setMaxAllocations] = useState('1')
+  const lastNodeRef = useRef<string | null>(null)
+  useEffect(() => {
+    if (node && lastNodeRef.current !== node.id) {
+      lastNodeRef.current = node.id
+      setMaxBackups(String(node.serverLimits?.maxBackups ?? 1))
+      setMaxAllocations('1')
+    }
+  }, [node])
 
   const users = usersData?.users ?? []
 
@@ -87,6 +101,8 @@ export function CreateServer({ onClose }: { onClose: () => void }) {
         memoryMb: Number(mem),
         cpuPercent,
         storageGb: Number(disk),
+        maxBackups: Number(maxBackups) || undefined,
+        maxAllocations: Number(maxAllocations) || undefined,
       })
       const serverId = res.server.id
       for (const email of selectedUsers) {
@@ -240,6 +256,50 @@ export function CreateServer({ onClose }: { onClose: () => void }) {
             </div>
           </div>
         </>
+      )}
+
+      {step === 'limits' && (
+        <div className="grid gap-3">
+          <div className="field">
+            <label>Backup limit</label>
+            <div className="flex" style={{ gap: 8, alignItems: 'center' }}>
+              <input
+                className="input flex-1"
+                type="number"
+                min={1}
+                max={100}
+                value={maxBackups}
+                onChange={(e) => setMaxBackups(e.target.value)}
+              />
+              <span className="xs">backup{Number(maxBackups) === 1 ? '' : 's'}</span>
+            </div>
+            <span className="xs text-3">
+              This server can keep up to {Number(maxBackups) || 0} backup{Number(maxBackups) === 1 ? '' : 's'} at a time (auto-backups prune to this too). Node default: {node?.serverLimits?.maxBackups ?? 1}.
+            </span>
+          </div>
+          <div className="field">
+            <label>Allocation limit</label>
+            <div className="flex" style={{ gap: 8, alignItems: 'center' }}>
+              <input
+                className="input flex-1"
+                type="number"
+                min={1}
+                max={100}
+                value={maxAllocations}
+                onChange={(e) => setMaxAllocations(e.target.value)}
+              />
+              <span className="xs">port{Number(maxAllocations) === 1 ? '' : 's'}</span>
+            </div>
+            <span className="xs text-3">How many addresses/ports this server may use. Most servers need exactly 1.</span>
+          </div>
+          <div className="card subtle p-2">
+            <div className="xs text-3">Summary</div>
+            <div className="cell-main">{name || (bp ? `${bp.name} Server` : 'Server')}</div>
+            <div className="cell-sub mono xs">
+              {node?.name} · {Number(mem) || 0} MB · {Number(disk) || 0} GB · {cpuCores ? `${cpuCores} core${Number(cpuCores) === 1 ? '' : 's'}` : '1 core'} ({cpuPercent}%) · {Number(maxBackups) || 1} backup limit · {Number(maxAllocations) || 1} max port{Number(maxAllocations) === 1 ? '' : 's'}
+            </div>
+          </div>
+        </div>
       )}
 
       {step === 'users' && (

@@ -1,8 +1,17 @@
 import { useEffect, useState } from 'react'
 import { api, downloadBlob } from '../../api/client'
 import { useSocket } from '../../hooks/useSocket'
-import { Icon, Spinner, toast } from '../../components/ui'
+import { Icon, Spinner, Switch, toast } from '../../components/ui'
 import type { Server } from '@uptimehost/types'
+
+interface AutoBackup {
+  enabled: boolean
+  intervalHours: number
+  retention: number
+  nextAt: number | null
+  lastAt: number | null
+  lastStatus: string | null
+}
 
 interface Backup {
   id: string
@@ -27,14 +36,16 @@ function fmt(n: number): string {
 
 export function BackupsTab({ server }: { server: Server }) {
   const [backups, setBackups] = useState<Backup[] | null>(null)
+  const [auto, setAuto] = useState<AutoBackup | null>(null)
   const [live, setLive] = useState<Record<string, string>>({})
   const [loading, setLoading] = useState(true)
   const [busy, setBusy] = useState(false)
+  const [savingAuto, setSavingAuto] = useState(false)
   const [name, setName] = useState('')
 
   const load = () => {
     setLoading(true)
-    api.get(`/servers/${server.id}/backups`).then((d) => setBackups(d.backups)).catch((e: any) => toast.err(e?.message)).finally(() => setLoading(false))
+    api.get(`/servers/${server.id}/backups`).then((d) => { setBackups(d.backups); setAuto(d.autoBackup) }).catch((e: any) => toast.err(e?.message)).finally(() => setLoading(false))
   }
   useEffect(() => { load() }, [server.id])
 
@@ -76,8 +87,56 @@ export function BackupsTab({ server }: { server: Server }) {
 
   const status = (b: Backup) => live[b.id] || b.status
 
+  const saveAuto = async () => {
+    if (!auto) return
+    setSavingAuto(true)
+    try {
+      const r = await api.post(`/servers/${server.id}/backups/auto`, auto)
+      setAuto(r.autoBackup)
+      toast.ok(auto.enabled ? 'Auto backups enabled' : 'Auto backups disabled')
+    } catch (e: any) { toast.err(e?.message || 'Failed to save settings') }
+    finally { setSavingAuto(false) }
+  }
+
+  const nextRun = auto?.nextAt ? new Date(auto.nextAt).toLocaleString() : '—'
+
   return (
-    <div className="card">
+    <div className="grid cols-1" style={{ gap: 12 }}>
+      <div className="card">
+        <div className="card-h">
+          <Icon name="clock" size={15} /> Auto backup <span className="h-sub">scheduled snapshots kept on the node</span>
+          <div style={{ flex: 1 }} />
+          <Switch checked={!!auto?.enabled} onChange={(v) => auto && setAuto({ ...auto, enabled: v })} />
+        </div>
+        <div className="p-3" style={{ display: 'grid', gap: 12 }}>
+          <div className="flex gap-2 items-center flex-wrap">
+            <span className="xs text-3">Backup every</span>
+            <select className="select" style={{ width: 130 }} disabled={!auto?.enabled} value={auto?.intervalHours || 24}
+              onChange={(e) => auto && setAuto({ ...auto, intervalHours: Number(e.target.value) })}>
+              {[1, 3, 6, 12, 24, 48, 72, 168].map((h) => (
+                <option key={h} value={h}>{h === 1 ? '1 hour' : h === 24 ? 'every day' : h === 168 ? 'every week' : `${h} hours`}</option>
+              ))}
+            </select>
+            <span className="xs text-3">keep</span>
+            <input className="input sm" style={{ width: 70 }} type="number" min={1} max={100} disabled={!auto?.enabled}
+              value={auto?.retention ?? 10} onChange={(e) => auto && setAuto({ ...auto, retention: Math.max(1, Math.min(100, Number(e.target.value) || 10)) })} />
+            <span className="xs text-3">backups</span>
+            <div style={{ flex: 1 }} />
+            {auto?.enabled && (
+              <span className="xs text-3">
+                next run <b style={{ color: 'var(--text)' }}>{nextRun}</b>
+                {auto.lastStatus && <> · last <span className={`badge xs ml-1 ${auto.lastStatus === 'ok' ? 'green' : 'amber'}`}>{auto.lastStatus}</span></>}
+              </span>
+            )}
+            <button className="btn sm primary" disabled={savingAuto || !auto} onClick={saveAuto}>
+              {savingAuto ? <Spinner size={13} /> : <Icon name="check" size={13} />} Save
+            </button>
+          </div>
+          <div className="xs text-3">Auto backups archive the server's files and delete the oldest copy once more than the keep limit exist. A new backup only runs while the server's node is reachable.</div>
+        </div>
+      </div>
+
+      <div className="card">
       <div className="card-h">
         <Icon name="download" size={15} /> Backups <span className="h-sub">real ZIP archives on the node</span>
         <div style={{ flex: 1 }} />
@@ -117,6 +176,7 @@ export function BackupsTab({ server }: { server: Server }) {
             </tbody>
           </table>
         )}
+      </div>
       </div>
     </div>
   )

@@ -140,14 +140,13 @@ export function Shell({ children, subnav }: { children: React.ReactNode; subnav?
               <span className="side-ico"><Icon name={mode === 'dark' ? 'sun' : 'moon'} size={16} /></span>
             </button>
           </Tooltip>
-            <button className="side-link icon-only" onClick={() => setShowUserMode(!showUserMode)} disabled={!canAdmin}>
-              <span className="side-ico"><Icon name="user" size={16} /></span>
-            </button>
-          <Tooltip tip="User mode" side="right">
-            <button className="side-link icon-only" onClick={() => setShowUserMode(!showUserMode)} disabled={!canAdmin}>
-              <span className="side-ico"><Icon name="user" size={16} /></span>
-            </button>
-          </Tooltip>
+            {canAdmin && (
+            <Tooltip tip="User mode" side="right">
+              <button className="side-link icon-only" onClick={() => setShowUserMode(!showUserMode)}>
+                <span className="side-ico"><Icon name="user" size={16} /></span>
+              </button>
+            </Tooltip>
+          )}
           <Tooltip tip="Account" side="right">
             <Link to="/account" className="side-link icon-only">
               <span className="avatar" style={{ width: 24, height: 24, fontSize: 10, background: `hsl(${user?.avatarHue || 0} 65% 45%)` }}>
@@ -192,7 +191,7 @@ export function Shell({ children, subnav }: { children: React.ReactNode; subnav?
           } items={[
             { label: 'Account', icon: 'user', onClick: () => navigate('/account') },
             { label: 'Theme', icon: mode === 'dark' ? 'sun' : 'moon', onClick: () => applyMode(mode === 'dark' ? 'light' : 'dark') },
-            { label: 'User mode', icon: 'user', onClick: () => setShowUserMode(!showUserMode), disabled: !canAdmin },
+            ...(canAdmin ? [{ label: 'User mode', icon: 'user' as const, onClick: () => setShowUserMode(!showUserMode) }] : []),
             { label: 'Sign out', icon: 'logout', danger: true, onClick: () => logout() },
           ]} />
         </header>
