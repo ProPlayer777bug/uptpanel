@@ -138,13 +138,23 @@ function buildUserContext(ctx: AIBroContext, user: any): string {
   for (const s of store.db.servers) {
     const acc = serverAccess(user, s, store)
     if (!acc.ok) continue
+    if (!isServerSelected(user, s)) continue
     const bp = store.db.blueprints.find((b: any) => b.id === s.blueprintId)
     const port = s.allocations?.[0]?.port
     rows.push(`- "${s.name}" id=${s.id} state=${s.state} version=${s.mcVersion || '?'} platform=${s.mcPlatform || (bp?.name || '?')} port=${port} image=${s.image || bp?.image || '?'} owner=${s.ownerEmail}`)
   }
   if (rows.length === 0)
-    return 'The user has no accessible servers. Recommend the list action or tell them to create one.'
-  return 'User servers:\n' + rows.join('\n')
+    return 'The user has no AIBro servers selected. Tell them to pick at least one server in the AIBro "Selected servers" section.'
+  return 'User servers (only these may be managed):\n' + rows.join('\n')
+}
+
+// A server is in-scope for a user when it is in the user's aibro.selectedServers
+// list (by id) OR the user has not set an explicit selection yet (empty/undefined
+// selection = allow all accessible servers, preserving existing behavior).
+export function isServerSelected(user: any, server: any): boolean {
+  const sel = user?.aibro?.selectedServers
+  if (!Array.isArray(sel) || sel.length === 0) return true
+  return sel.includes(server.id)
 }
 
 // Call the model. Returns raw text.
@@ -234,9 +244,10 @@ async function executeAction(ctx: AIBroContext, user: any, action: any): Promise
   const resolve = (nameOrId?: string) => {
     if (!nameOrId) return null
     const target = String(nameOrId).trim().toLowerCase()
-    return store.db.servers.find((s: any) =>
+    const candidates = store.db.servers.filter((s: any) => isServerSelected(user, s))
+    return candidates.find((s: any) =>
       s.id.toLowerCase() === target || s.name.toLowerCase() === target
-    ) || store.db.servers.find((s: any) => s.name.toLowerCase().includes(target)) || null
+    ) || candidates.find((s: any) => s.name.toLowerCase().includes(target)) || null
   }
 
   if (action.action === 'answer') return action.text || 'I need a little more information.'

@@ -5,11 +5,17 @@ import { Icon, Spinner, toast } from './ui'
 interface AIBroKeyView { id: string; label: string; masked: string; createdAt: number }
 interface AIBroProviderView { id: string; label: string; maxKeys: number; keyCount: number }
 interface ChatMsg { from: 'user' | 'aibro'; text: string; provider?: string }
+interface AIBroServerView { id: string; name: string; state: string; selected: boolean }
 
 export function AIBro() {
   const [providers, setProviders] = useState<AIBroProviderView[]>([])
   const [keyGroups, setKeyGroups] = useState<{ provider: string; keys: AIBroKeyView[] }[]>([])
   const [loading, setLoading] = useState(true)
+
+  // Server scope
+  const [servers, setServers] = useState<AIBroServerView[]>([])
+  const [selectedServers, setSelectedServers] = useState<string[]>([])
+  const [selLoaded, setSelLoaded] = useState(false)
 
   // Add-mode fields
   const [addFor, setAddFor] = useState<string>('')
@@ -28,11 +34,33 @@ export function AIBro() {
     api.get('/aibro').then((d) => {
       setProviders(d.providers || [])
       setKeyGroups(d.keys || [])
+      if (d.selectedServers && d.selectedServers.length) setSelectedServers(d.selectedServers)
       setChatProvider((cur) => cur && d.providers.some((p: AIBroProviderView) => p.id === cur) ? cur : (d.providers.find((p: AIBroProviderView) => p.keyCount > 0)?.id || ''))
     }).catch((e: any) => toast.err(e?.message))
       .finally(() => setLoading(false))
   }
   useEffect(() => { load() }, [])
+
+  const loadServers = () => {
+    api.get('/aibro/servers').then((d) => {
+      setServers(d.servers || [])
+      setSelectedServers(d.selectedServers || [])
+    }).catch((e: any) => toast.err(e?.message))
+      .finally(() => setSelLoaded(true))
+  }
+  useEffect(() => { loadServers() }, [])
+
+  const saveServers = async () => {
+    try {
+      const res = await api.put('/aibro/servers', { serverIds: selectedServers })
+      setSelectedServers(res.selectedServers || [])
+      toast.ok(selectedServers.length ? `AIBro scoped to ${selectedServers.length} server${selectedServers.length === 1 ? '' : 's'}` : 'AIBro can now manage all your servers')
+    } catch (e: any) { toast.err(e?.message) }
+  }
+
+  const toggleServer = (id: string) => {
+    setSelectedServers((cur) => (cur.includes(id) ? cur.filter((x) => x !== id) : [...cur, id]))
+  }
 
   useEffect(() => {
     endRef.current?.scrollIntoView({ block: 'nearest' })
@@ -133,6 +161,39 @@ export function AIBro() {
                 </div>
               )
             })}
+          </div>
+        )}
+
+        <div className="sm text-3 mb-2 mt-4">Selected servers</div>
+        <p className="xs text-3" style={{ marginBottom: 10 }}>
+          AIBro can manage all servers you have access to, or only the ones you pick below. When a selection is active, unselected servers are off-limits to it. Empties mean "all my servers".
+        </p>
+        {!selLoaded ? (
+          <div className="center" style={{ padding: 12 }}><Spinner size={18} /></div>
+        ) : servers.length === 0 ? (
+          <div className="xs text-3 card subtle p-2">You don't have access to any servers yet. Create one from the dashboard and AIBro can manage it.</div>
+        ) : (
+          <div>
+            <div className="grid gap-1" style={{ maxHeight: 200, overflowY: 'auto', border: '1px solid var(--line)', borderRadius: 8, padding: 6 }}>
+              {servers.map((s) => {
+                const checked = selectedServers.includes(s.id)
+                return (
+                  <label key={s.id} className="select-row flex" style={{ cursor: 'pointer', alignItems: 'center', gap: 10 }}>
+                    <input type="checkbox" checked={checked} onChange={() => toggleServer(s.id)} />
+                    <div style={{ flex: 1 }}>
+                      <span className="cell-main">{s.name}</span>
+                    </div>
+                    <span className={`badge ${s.state === 'running' ? 'green' : 'gray'} sm`}>{s.state}</span>
+                  </label>
+                )
+              })}
+            </div>
+            <div className="flex mt-2" style={{ gap: 8, alignItems: 'center' }}>
+              <button className="btn sm primary" onClick={saveServers}>Save server scope</button>
+              <button className="btn sm ghost" onClick={() => setSelectedServers(servers.map((s) => s.id))}>Select all</button>
+              <button className="btn sm ghost" onClick={() => setSelectedServers([])}>All servers</button>
+            </div>
+            <div className="xs text-3 mt-1">Selection: {selectedServers.length === 0 ? 'all accessible servers' : `${selectedServers.length} server${selectedServers.length === 1 ? '' : 's'}`}</div>
           </div>
         )}
 

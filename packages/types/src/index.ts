@@ -26,6 +26,11 @@ export interface User {
   role: 'owner' | 'admin' | 'operator' | 'developer' | 'viewer'
   avatarHue: number
   createdAt: number
+  /** Per-user server scope for AIBro: if set, AIBro only manages these servers. */
+  aibro?: {
+    keys?: Record<string, { id: string; label: string; key: string; createdAt: number }[]>
+    selectedServers?: string[]
+  }
 }
 
 export interface Location {

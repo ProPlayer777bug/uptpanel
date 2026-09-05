@@ -3279,7 +3279,45 @@ app.get('/api/aibro', async (req, reply) => {
     ok: true,
     providers: AIBRO_PROVIDERS.map((p) => ({ id: p.id, label: p.label, maxKeys: p.maxKeys, keyCount: aibroKeysFor(user, p.id).length })),
     keys: AIBRO_PROVIDERS.map((p) => ({ provider: p.id, keys: aibroKeysFor(user, p.id).map((k) => ({ id: k.id, label: k.label, masked: maskApiKey(k.key), createdAt: k.createdAt })) })).filter((r) => r.keys.length > 0),
+    selectedServers: (user?.aibro?.selectedServers || []) as string[],
   }
+})
+
+// Set which servers AIBro is allowed to manage for this user. Empty array /
+// undefined means "all servers I have access to". Only servers the user can
+// actually access may be selected.
+app.put('/api/aibro/servers', async (req, reply) => {
+  const user = me(req)
+  if (!user) return reply.code(401).send({ ok: false, error: 'UNAUTHENTICATED' })
+  const { serverIds } = (req.body || {}) as any
+  const requested: string[] = Array.isArray(serverIds) ? serverIds : []
+  // Resolve access for each requested server id.
+  const valid: string[] = []
+  for (const id of requested) {
+    const server = store.db.servers.find((s) => s.id === id)
+    if (server && serverAccess(user, server, store).ok) valid.push(id)
+  }
+  user.aibro = user.aibro || {}
+  user.aibro.selectedServers = valid
+  store.persist()
+  return { ok: true, selectedServers: valid }
+})
+
+app.get('/api/aibro/servers', async (req, reply) => {
+  const user = me(req)
+  if (!user) return reply.code(401).send({ ok: false, error: 'UNAUTHENTICATED' })
+  // Full list of servers the user can access, each flagging whether it is
+  // currently in the AIBro scope.
+  const servers = store.db.servers
+    .filter((s: any) => serverAccess(user, s, store).ok)
+    .map((s: any) => ({
+      id: s.id,
+      name: s.name,
+      state: s.state,
+      selected: (user?.aibro?.selectedServers || []).includes(s.id),
+    }))
+  const sel = (user?.aibro?.selectedServers || []) as string[]
+  return { ok: true, servers, selectedServers: sel }
 })
 
 app.post('/api/aibro/keys', async (req, reply) => {
