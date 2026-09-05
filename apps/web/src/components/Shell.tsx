@@ -63,6 +63,7 @@ export function Shell({ children, subnav }: { children: React.ReactNode; subnav?
   const navigate = useNavigate()
   const { pathname } = useLocation()
   const [palette, setPalette] = useState(false)
+  const [showUserMode, setShowUserMode] = useState(false)
   const [collapsed, setCollapsed] = useState(() => localStorage.getItem('uh_side_collapsed') === '1')
   const [drawer, setDrawer] = useState(false)
 
@@ -139,6 +140,14 @@ export function Shell({ children, subnav }: { children: React.ReactNode; subnav?
               <span className="side-ico"><Icon name={mode === 'dark' ? 'sun' : 'moon'} size={16} /></span>
             </button>
           </Tooltip>
+            <button className="side-link icon-only" onClick={() => setShowUserMode(!showUserMode)} disabled={!canAdmin}>
+              <span className="side-ico"><Icon name="user" size={16} /></span>
+            </button>
+          <Tooltip tip="User mode" side="right">
+            <button className="side-link icon-only" onClick={() => setShowUserMode(!showUserMode)} disabled={!canAdmin}>
+              <span className="side-ico"><Icon name="user" size={16} /></span>
+            </button>
+          </Tooltip>
           <Tooltip tip="Account" side="right">
             <Link to="/account" className="side-link icon-only">
               <span className="avatar" style={{ width: 24, height: 24, fontSize: 10, background: `hsl(${user?.avatarHue || 0} 65% 45%)` }}>
@@ -183,6 +192,7 @@ export function Shell({ children, subnav }: { children: React.ReactNode; subnav?
           } items={[
             { label: 'Account', icon: 'user', onClick: () => navigate('/account') },
             { label: 'Theme', icon: mode === 'dark' ? 'sun' : 'moon', onClick: () => applyMode(mode === 'dark' ? 'light' : 'dark') },
+            { label: 'User mode', icon: 'user', onClick: () => setShowUserMode(!showUserMode), disabled: !canAdmin },
             { label: 'Sign out', icon: 'logout', danger: true, onClick: () => logout() },
           ]} />
         </header>
@@ -194,6 +204,35 @@ export function Shell({ children, subnav }: { children: React.ReactNode; subnav?
           <div className="content-wrapper">{children}</div>
         </div>
       </div>
+
+        {showUserMode && (
+          <div className="user-mode-overlay">
+            <div className="user-mode-panel">
+              <div className="user-mode-header">
+                <Icon name="user" size={24} className="accent" />
+                <span>User mode</span>
+                <button className="user-mode-close" onClick={() => setShowUserMode(false)}>&times;</button>
+              </div>
+              <div className="user-mode-body">
+                <p>Select user to debug as:</p>
+                <div className="user-mode-list">
+                  <div className="user-mode-item" onClick={() => setShowUserMode(false)}>
+                    <span>Server Admin</span>
+                  </div>
+                  <div className="user-mode-item" onClick={() => setShowUserMode(false)}>
+                    <span>User 1</span>
+                  </div>
+                  <div className="user-mode-item" onClick={() => setShowUserMode(false)}>
+                    <span>User 2</span>
+                  </div>
+                </div>
+              </div>
+              <div className="user-mode-footer">
+                <button className="user-mode-exit" onClick={() => setShowUserMode(false)}>Exit user mode</button>
+              </div>
+            </div>
+          </div>
+        )}
 
       {/* ============ Mobile drawer ============ */}
       {drawer && (

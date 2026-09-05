@@ -299,6 +299,10 @@ func (s *Server) handleServer(w http.ResponseWriter, r *http.Request, id, sub st
 		if cmd == "" && len(body.Commands) > 0 {
 			cmd = body.Commands[0]
 		}
+		if isSparkCommand(cmd) {
+			writeJSON(w, 403, map[string]any{"ok": false, "error": "spark is disabled on this server"})
+			return
+		}
 		sent, serr := s.dm.SendCommand(ctx, id, cmd)
 		if sent && serr == nil {
 			writeJSON(w, 200, map[string]any{"ok": true})
@@ -494,6 +498,46 @@ func resolvePath(hostRoot, inContainerPath string) string {
 	return backup.SafeResolve(hostRoot, inner)
 }
 
+// isSparkName reports whether a file or directory name is a Spark artifact
+// (the Spark profiler/plugin bundled into Paper and its extracted runtime
+// directories). Spark is compiled into the Paper jar itself, so it cannot be
+// stripped from the jar without breaking the server; instead it is hidden from
+// the file manager and its console commands are rejected. Enforcement lives
+// node-side so every user is covered regardless of how the plugin arrived
+// (uploaded externally, installed from the version/plugin downloader, or
+// extracted by the server).
+func isSparkName(name string) bool {
+	lower := strings.ToLower(name)
+	return lower == "spark" ||
+		strings.HasPrefix(lower, "spark-") ||
+		lower == "lucko"
+}
+
+// sparkPathHidden reports whether any path segment of p matches a Spark
+// artifact name, meaning the path must be withheld from file-manager callers.
+func sparkPathHidden(p string) bool {
+	for _, seg := range strings.Split(p, "/") {
+		if seg == "" {
+			continue
+		}
+		if isSparkName(seg) {
+			return true
+		}
+	}
+	return false
+}
+
+// isSparkCommand reports whether a console command is a Spark invocation
+// (the spark <subcommand> family, e.g. "spark", "spark tps", "spark profiler").
+func isSparkCommand(cmd string) bool {
+	c := strings.TrimSpace(strings.TrimPrefix(cmd, "/"))
+	if c == "" {
+		return false
+	}
+	first := strings.Fields(c)[0]
+	return strings.EqualFold(first, "spark")
+}
+
 // zipSingleFile zips one regular file into dest, returning bytes written.
 func zipSingleFile(src, dest string) (int64, error) {
 	info, err := os.Stat(src)
@@ -540,6 +584,10 @@ func (s *Server) handleFiles(ctx context.Context, w http.ResponseWriter, r *http
 		writeJSON(w, 400, map[string]any{"error": "unsafe path"})
 		return
 	}
+	if sparkPathHidden(q) {
+		writeJSON(w, 404, map[string]any{"error": "path not found"})
+		return
+	}
 
 	switch {
 	case strings.HasPrefix(sub, "files/content") && r.Method == http.MethodGet:
@@ -562,6 +610,10 @@ func (s *Server) handleFiles(ctx context.Context, w http.ResponseWriter, r *http
 		target := resolvePath(hostRoot, body.Path)
 		if target == "" {
 			writeJSON(w, 400, map[string]any{"error": "unsafe path"})
+			return
+		}
+		if sparkPathHidden(target) {
+			writeJSON(w, 404, map[string]any{"error": "path not found"})
 			return
 		}
 		if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
@@ -613,6 +665,10 @@ func (s *Server) handleFiles(ctx context.Context, w http.ResponseWriter, r *http
 			writeJSON(w, 400, map[string]any{"error": "unsafe path"})
 			return
 		}
+		if sparkPathHidden(target) {
+			writeJSON(w, 404, map[string]any{"error": "path not found"})
+			return
+		}
 		if target == hostRoot {
 			writeJSON(w, 400, map[string]any{"error": "cannot delete server root"})
 			return
@@ -649,6 +705,10 @@ func (s *Server) handleFiles(ctx context.Context, w http.ResponseWriter, r *http
 		src := resolvePath(hostRoot, body.Path)
 		if src == "" {
 			writeJSON(w, 400, map[string]any{"error": "unsafe path"})
+			return
+		}
+		if sparkPathHidden(src) {
+			writeJSON(w, 404, map[string]any{"error": "path not found"})
 			return
 		}
 		total, err := backup.Extract(src, hostRoot)
@@ -713,12 +773,16 @@ func (s *Server) handleFiles(ctx context.Context, w http.ResponseWriter, r *http
 					writeJSON(w, 500, map[string]any{"error": err.Error()})
 					return
 				}
-				target := backup.SafeResolve(fsPath, fname)
-				if target == "" {
-					writeJSON(w, 400, map[string]any{"error": "unsafe upload name: " + fname})
-					return
-				}
-				in, err := fh.Open()
+target := backup.SafeResolve(fsPath, fname)
+		if target == "" {
+			writeJSON(w, 400, map[string]any{"error": "unsafe upload name: " + fname})
+			return
+		}
+		if sparkPathHidden(target) {
+			writeJSON(w, 400, map[string]any{"error": "cannot upload spark artifact"})
+			return
+		}
+		in, err := fh.Open()
 				if err != nil {
 					writeJSON(w, 500, map[string]any{"error": err.Error()})
 					return
@@ -853,15 +917,19 @@ func (s *Server) handleFiles(ctx context.Context, w http.ResponseWriter, r *http
 		}
 		list := make([]ent, 0)
 		for _, e := range entries {
+			if isSparkName(e.Name()) {
+				continue
+			}
 			info, _ := e.Info()
 			sz := int64(0)
 			if info != nil {
 				sz = info.Size()
 			}
-			list = append(list, ent{Name: e.Name(), Dir: e.IsDir(), Size: sz, Mode: fmt.Sprintf("%04o", 0)})
+			mode := fmt.Sprintf("%04o", 0)
 			if info != nil {
-				list[len(list)-1].Mode = fmt.Sprintf("%04o", info.Mode().Perm())
+				mode = fmt.Sprintf("%04o", info.Mode().Perm())
 			}
+			list = append(list, ent{Name: e.Name(), Dir: e.IsDir(), Size: sz, Mode: mode})
 		}
 		writeJSON(w, 200, map[string]any{"path": q, "entries": list})
 	}

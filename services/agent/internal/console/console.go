@@ -11,6 +11,7 @@ package console
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"sync"
 	"time"
 
@@ -173,6 +174,11 @@ func (h *Hub) Serve(serverID string, ws *websocket.Conn) {
 			}
 			cmd := m.Args[0]
 			go func(c string) {
+				if isSparkCommand(c) {
+					h.send(ws, Message{Event: consoleOut, Args: []string{"> " + c}})
+					h.send(ws, Message{Event: consoleOut, Args: []string{"spark is disabled on this server"}})
+					return
+				}
 				h.send(ws, Message{Event: consoleOut, Args: []string{"> " + c}})
 				if sent, err := h.dm.SendCommand(context.Background(), serverID, c); err == nil && sent {
 					return
@@ -257,4 +263,17 @@ func (h *Hub) send(ws *websocket.Conn, m Message) {
 	}
 	_ = ws.SetWriteDeadline(time.Now().Add(5 * time.Second))
 	_ = ws.WriteJSON(m)
+}
+
+// isSparkCommand reports whether a console command is a Spark invocation
+// (the spark <subcommand> family: "spark", "spark tps", "spark profiler").
+// Spark is compiled into the Paper jar, so its commands are rejected node-side
+// for every user instead of the plugin being removed from the jar.
+func isSparkCommand(cmd string) bool {
+	c := strings.TrimSpace(strings.TrimPrefix(cmd, "/"))
+	if c == "" {
+		return false
+	}
+	first := strings.Fields(c)[0]
+	return strings.EqualFold(first, "spark")
 }

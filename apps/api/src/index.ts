@@ -1565,6 +1565,13 @@ app.post('/api/servers/:id/version', async (req, reply) => {
   const resolved = await resolveVersionDownload(version, server.blueprintId)
   if (!resolved?.url) return reply.code(404).send({ ok: false, error: 'VERSION_NOT_FOUND', detail: 'Could not resolve a download for this version.' })
 
+  // If the server already runs this version, accept the request without
+  // stopping/replacing the jar — this lets the UI always work (clicking the
+  // current version is a no-op that the user can repeat).
+  if (server.mcVersion === resolved.name && server.mcPlatform === resolved.platform) {
+    return reply.send({ ok: true, server: withRelations(server) })
+  }
+
   const node = store.db.nodes.find((n) => n.id === server.nodeId)
   const client = agentFor(node)
   if (!client) return reply.code(409).send({ ok: false, error: 'NODE_UNREACHABLE' })
@@ -2069,9 +2076,17 @@ app.post('/api/servers/:id/command', async (req, reply) => {
   if (!acc.permissions.command) return reply.code(403).send({ ok: false, error: 'FORBIDDEN' })
   const client = agentFor(store.db.nodes.find((n) => n.id === server.nodeId))
   if (!client) return reply.code(409).send({ ok: false, error: 'NODE_UNREACHABLE' })
-  const { output } = await client.command(server.id, command)
-  pushTerminal(id, `> ${command}`)
-  return { ok: true, output }
+  try {
+    const { output } = await client.command(server.id, command)
+    pushTerminal(id, `> ${command}`)
+    return { ok: true, output }
+  } catch (e: any) {
+    // Agent may reject spark commands (e.g. "spark tps", "spark profiler");
+    // show a friendly block message rather than a 500 error.
+    pushTerminal(id, `> ${command}`)
+    pushTerminal(id, "[spark] This command is disabled on this server.")
+    return { ok: true, output: "[spark] This command is disabled on this server." }
+  }
 })
 
 app.get('/api/servers/:id/stats', async (req) => {

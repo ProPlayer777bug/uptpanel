@@ -82,7 +82,7 @@ export function VersionManager({ server, open, onClose }: { server: Server; open
                 key={v.id}
                 className="select-row"
                 style={{ cursor: 'pointer' }}
-                onClick={() => isCur ? null : setTarget(v.id)}
+                onClick={() => setTarget(v.id)}
               >
                 <Icon name="box" size={15} className={isCur ? 'text-3' : 'accent'} />
                 <div style={{ flex: 1 }}>
