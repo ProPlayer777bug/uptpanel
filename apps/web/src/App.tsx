@@ -6,6 +6,7 @@ import { Login } from './pages/Login'
 import { OAuthCallback } from './pages/OAuthCallback'
 import { PrivacyPolicy } from './pages/PrivacyPolicy'
 import { Shell } from './components/Shell'
+import { PanelBackground } from './components/PanelBackground'
 
 const Dashboard = lazy(() => import('./pages/Dashboard').then((m) => ({ default: m.Dashboard })))
 const Servers = lazy(() => import('./pages/Servers').then((m) => ({ default: m.Servers })))
@@ -15,6 +16,7 @@ const NodeDetail = lazy(() => import('./pages/NodeDetail').then((m) => ({ defaul
 const Locations = lazy(() => import('./pages/Locations').then((m) => ({ default: m.Locations })))
 const Activity = lazy(() => import('./pages/Activity').then((m) => ({ default: m.Activity })))
 const Account = lazy(() => import('./pages/Account').then((m) => ({ default: m.Account })))
+const General = lazy(() => import('./pages/General').then((m) => ({ default: m.General })))
 const Alerts = lazy(() => import('./pages/Alerts').then((m) => ({ default: m.Alerts })))
 const Templates = lazy(() => import('./pages/Templates').then((m) => ({ default: m.Templates })))
 const Users = lazy(() => import('./pages/Users').then((m) => ({ default: m.Users })))
@@ -55,11 +57,12 @@ export default function App() {
     return <Routes><Route path="/privacy" element={<PrivacyPolicy />} /></Routes>
   }
 
-  if (booting) return <Splash />
-  if (!user) return <Login />
+  if (booting) return <><PanelBackground /><Splash /></>
+  if (!user) return <><PanelBackground /><Login /></>
 
   return (
     <ErrorBoundary>
+      <PanelBackground />
       <Routes>
         <Route path="/" element={<Page><Dashboard /></Page>} />
         <Route path="/servers" element={<Page><Servers /></Page>} />
@@ -76,6 +79,7 @@ export default function App() {
         <Route path="/auth-providers" element={<Page><AdminRoute><AuthProviders /></AdminRoute></Page>} />
         <Route path="/account" element={<Page><Account /></Page>} />
         <Route path="/account/api-keys" element={<Page><Account focus="api-keys" /></Page>} />
+        <Route path="/general" element={<Page><General /></Page>} />
         <Route path="/themes" element={<Page><Themes /></Page>} />
         <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>

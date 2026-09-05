@@ -16,7 +16,8 @@ const NAV_GROUPS: { title: string; admin?: boolean; items: NavItem[] }[] = [
       { to: '/', label: 'Dashboard', icon: 'home' },
       { to: '/servers', label: 'Servers', icon: 'server' },
       { to: '/themes', label: 'Themes', icon: 'palette' },
-      { to: '/account', label: 'Settings', icon: 'gear' },
+      { to: '/general', label: 'General', icon: 'gear' },
+      { to: '/account', label: 'Settings', icon: 'user' },
     ],
   },
   {

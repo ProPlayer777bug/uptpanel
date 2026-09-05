@@ -3374,6 +3374,48 @@ function maskApiKey(k: string): string {
   return `${k.slice(0, 3)}…${k.slice(-4)}`
 }
 
+// ---------------------------------------------------------------------------
+// Panel background — admins set a wallpaper or a short (<=10s) live wallpaper
+// for the whole panel. Public GET so the login screen renders it too; only
+// admins can change it. Media is stored inline (data: URL) or as an external
+// URL provided by the admin.
+// ---------------------------------------------------------------------------
+app.get('/api/settings/background', async (req, reply) => {
+  return { ok: true, background: store.db.settings?.background || null }
+})
+
+app.put('/api/settings/background', { bodyLimit: 32 * 1024 * 1024 }, async (req, reply) => {
+  const user = me(req)
+  if (!user) return reply.code(401).send({ ok: false, error: 'UNAUTHENTICATED' })
+  if (!can(user, 'admin')) return reply.code(403).send({ ok: false, error: 'FORBIDDEN' })
+  const bg = ((req.body || {}) as any).background || {}
+  const enabled = !!bg.enabled
+  const kind = bg.kind === 'live' ? 'live' : 'wallpaper'
+  const url = String(bg.url || '').trim()
+  if (enabled) {
+    if (!url) return reply.code(400).send({ ok: false, error: 'NO_URL' })
+    const isData = /^data:(image\/|video\/)/i.test(url)
+    const isHttp = /^https?:\/\//i.test(url)
+    if (!isData && !isHttp) return reply.code(400).send({ ok: false, error: 'INVALID_URL' })
+    if (isData) {
+      const mime = (url.split(';')[0] || '').split(':')[1] || ''
+      if (kind === 'wallpaper' && !/^image\//.test(mime)) {
+        return reply.code(400).send({ ok: false, error: 'WALLPAPER_MUST_BE_IMAGE' })
+      }
+      if (kind === 'live' && !/^video\//.test(mime)) {
+        return reply.code(400).send({ ok: false, error: 'LIVE_MUST_BE_VIDEO' })
+      }
+    }
+  }
+  const durationSec = Math.max(1, Math.min(10, Math.round(Number(bg.durationSec) || 5)))
+  store.db.settings = store.db.settings || {}
+  store.db.settings.background = { enabled, kind, url: url || '', durationSec, updatedAt: Date.now(), updatedBy: user.email }
+  store.persist()
+  activity(user, 'server', 'info', 'Updated panel background', { kind })
+  audit(store, user.name, 'EDIT_CONFIG', `panel background (${kind}, ${durationSec}s)`)
+  return { ok: true, background: store.db.settings.background }
+})
+
 // Background cron ticker — every 10s check due schedules (per-minute granularity).
 setInterval(() => {
   for (const schedule of store.db.schedules) {

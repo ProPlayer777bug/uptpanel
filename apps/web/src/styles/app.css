@@ -121,6 +121,16 @@ button { font-family: var(--font-ui); }
    Layout shell — left sidebar + top bar (redesigned)
    ============================================================ */
 .shell { display: flex; height: 100vh; overflow: hidden; background: var(--bg); }
+
+/* Panel background layer: fixed, sits behind the app so a wallpaper or a short
+   live wallpaper (<=10s loop) can show around the panes. While active, the
+   shell becomes transparent and a scrim keeps content readable. */
+.panel-bg-layer { position: fixed; inset: 0; z-index: -10; overflow: hidden; background: var(--bg); pointer-events: none; }
+.panel-bg-layer .panel-bg-img { position: absolute; inset: 0; background-size: cover; background-position: center; }
+.panel-bg-layer video { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
+.panel-bg-scrim { position: absolute; inset: 0; background: linear-gradient(180deg, rgba(0,0,0,0.35), rgba(0,0,0,0.55)); }
+html.uh-bg .shell { background: transparent !important; }
+html.uh-bg .login-wrap { background: transparent; }
 .shell-main { flex: 1; display: flex; flex-direction: column; min-width: 0; overflow: hidden; }
 .main { flex: 1; display: flex; flex-direction: column; min-width: 0; overflow-y: auto; }
 .avatar {
