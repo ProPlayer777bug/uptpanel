@@ -535,14 +535,14 @@ textarea.input { resize: vertical; min-height: 80px; }
   font-family: var(--font-mono); font-size: 13px; line-height: 1.6;
   border-radius: var(--r-md); padding: 4px 0;
   height: 100%; overflow-y: auto; white-space: pre-wrap; word-break: break-word;
+  position: relative;
 }
 .term-line { padding: 0 14px; }
 .term-line:hover { background: rgba(255,255,255,0.02); }
 .term-line .ts { color: #54617a; margin-right: 10px; user-select: none; font-size: 12px; }
-.term-info .txt { color: #7ee0a3; }
-.term-warn .txt { color: #f5c45c; }
-.term-error .txt { color: #ff7b7b; }
-.term-command .txt { color: #9ecbff; }
+.term-line .txt {
+  color: #ffd23f;
+}
 .term-cursor {
   display: inline-block; width: 7px; height: 14px;
   background: var(--cyan-strong); animation: blink 1.1s steps(1) infinite;
@@ -550,25 +550,35 @@ textarea.input { resize: vertical; min-height: 80px; }
 }
 @keyframes blink { 50% { opacity: 0; } }
 
+/* "↓ New logs" jump chip — shown when the user scrolls up and new output lands */
+.term-jump {
+  position: sticky; bottom: 10px; left: 50%; transform: translateX(-50%);
+  z-index: 5; margin: 0; padding: 4px 14px; border: 1px solid var(--line);
+  border-radius: 999px; background: var(--bg-2, #161b26); color: var(--accent, #4aa6ff);
+  font-family: var(--font-mono); font-size: 12px; cursor: pointer;
+  box-shadow: 0 4px 14px rgba(0,0,0,.4);
+}
+.term-jump:hover { background: var(--accent, #4aa6ff); color: #fff; }
+
 /* Pterodactyl-style stat blocks for console */
-/* Console grid - terminal fixed height, sidebar beside it */
+/* Console grid - terminal fixed height, sidebar beside it.
+   Rows size to content (align-items:start) so the black terminal box never
+   leaves a dead gap below itself when the sidebar is taller. */
 .console-grid {
   display: grid;
   grid-template-columns: 1fr 300px;
-  grid-template-rows: 1fr auto;
   gap: var(--sp-4);
-  min-height: 0;
+  align-items: start;
 }
 
 @media (min-width: 1025px) {
-  .console-grid { height: calc(100vh - 220px); }
-  .term-window { min-height: 0; }
+  .term-window { min-height: 0; height: min(50vh + 96px, calc(100vh - 330px)); max-height: min(50vh + 96px, calc(100vh - 330px)); }
 }
 
 /* Terminal window frame — fixed height box (half screen) */
 .term-window {
   grid-column: 1;
-  grid-row: 1;
+  align-self: start;
   display: flex; flex-direction: column;
   height: 50vh; /* half the viewport height */
   min-height: 300px;
@@ -595,7 +605,7 @@ textarea.input { resize: vertical; min-height: 80px; }
 .term-title { display: flex; align-items: center; gap: 7px; color: var(--text-2); }
 
 .term-window .terminal {
-  flex: 1; min-height: 0; border-radius: 0; padding: 10px 0 80px 0;
+  flex: 1; min-height: 0; border-radius: 0; padding: 10px 0 10px 0;
   box-shadow: inset 0 0 0 transparent;
   background: var(--code-bg);
   overflow-y: auto;
@@ -624,7 +634,6 @@ textarea.input { resize: vertical; min-height: 80px; }
 
 .console-sidebar {
   grid-column: 2;
-  grid-row: 1 / 3;
 }
 .sidebar-actions {
   padding: 8px 12px;
@@ -1592,7 +1601,7 @@ textarea.input { resize: vertical; min-height: 80px; }
 .fm .fm-create { border-bottom-color: var(--gold-line) !important; }
 
 /* Checkboxes — gold */
-.fm .dtable input[type='checkbox'] { accent-color: var(--gold-bright); }
+.fm .dtable input[type='checkbox'] { accent-color: var(--gold-bright); width: 17px; height: 17px; cursor: pointer; }
 
 /* Menu trigger dot hover */
 .fm .menu .btn.ghost.icon:hover { color: var(--gold-bright); }
@@ -1606,6 +1615,116 @@ textarea.input { resize: vertical; min-height: 80px; }
   box-shadow: 0 4px 14px var(--gold-line);
 }
 .fm .btn.primary:hover { background: linear-gradient(180deg, var(--gold-bright), var(--gold-strong)); box-shadow: 0 4px 20px var(--gold-line); }
+
+/* Toolbar wraps on narrow widths so the Theme picker stays reachable */
+.fm .fm-toolbar { flex-wrap: wrap; }
+
+/* ---- File-manager theme picker ---- */
+.fm-theme-menu {
+  position: absolute; right: 0; top: calc(100% + 6px); z-index: 60;
+  background: var(--surface-2); border: 1px solid var(--line-strong);
+  border-radius: var(--r-md); box-shadow: var(--shadow-lg); padding: 6px;
+  width: 186px; display: grid; gap: 2px;
+}
+.fm-theme-item {
+  display: flex; align-items: center; gap: 8px; width: 100%;
+  background: transparent; border: none; border-radius: var(--r-sm);
+  color: var(--text-2); font-size: 13px; padding: 6px 8px; cursor: pointer; text-align: left;
+}
+.fm-theme-item:hover { background: var(--surface-3); color: var(--text); }
+.fm-theme-item.active { color: var(--text); }
+.fm-theme-dot { width: 14px; height: 14px; border-radius: 50%; flex-shrink: 0; box-shadow: inset 0 0 0 1px rgba(255,255,255,.18); }
+
+/* ---- File-manager themes (10) — scoped to the .fm subtree only ----
+   Each theme re-paints the internal gold accent family plus the surface /
+   text / border tokens so the whole manager (toolbar, table, editor,
+   checkboxes, primary buttons) takes on its own identity while the rest of
+   the panel stays untouched. */
+.fm.fm-t-gold {
+  --gold: #d4a017; --gold-strong: #ffd24a; --gold-bright: #fdc92f;
+  --gold-soft: rgba(212,160,23,0.16); --gold-line: rgba(224,180,40,0.45); --gold-ink: #241903;
+}
+.fm.fm-t-midnight {
+  --gold: #4aa6ff; --gold-strong: #79c0ff; --gold-bright: #58a6ff;
+  --gold-soft: rgba(88,166,255,0.16); --gold-line: rgba(88,166,255,0.45); --gold-ink: #071627;
+  --bg: #0d1117; --bg-2: #161b22;
+  --surface: #161b22; --surface-2: #1b2230; --surface-3: #232d3f;
+  --line: #21262d; --line-strong: #30363d;
+  --text: #e6edf3; --text-2: #9ba6b4; --text-3: #6e7886;
+  --code-bg: #0d1117;
+}
+.fm.fm-t-amethyst {
+  --gold: #8b6bf7; --gold-strong: #b9a4ff; --gold-bright: #a78bfa;
+  --gold-soft: rgba(167,139,250,0.16); --gold-line: rgba(196,175,255,0.45); --gold-ink: #170b33;
+  --bg: #0e0b1a; --bg-2: #171229;
+  --surface: #171229; --surface-2: #1f183a; --surface-3: #282048;
+  --line: #241e3c; --line-strong: #322a52;
+  --text: #ece9fa; --text-2: #aaa3ca; --text-3: #6f6a92;
+  --code-bg: #0e0b1a;
+}
+.fm.fm-t-emerald {
+  --gold: #22b573; --gold-strong: #5eead4; --gold-bright: #34d399;
+  --gold-soft: rgba(52,211,153,0.16); --gold-line: rgba(52,211,153,0.45); --gold-ink: #042a1a;
+  --bg: #07130d; --bg-2: #0f2018;
+  --surface: #0f2018; --surface-2: #142e21; --surface-3: #1b3b2b;
+  --line: #163423; --line-strong: #1f4a33;
+  --text: #e8f5ee; --text-2: #8fb7a3; --text-3: #5f8a74;
+  --code-bg: #07130d;
+}
+.fm.fm-t-ocean {
+  --gold: #22d3ee; --gold-strong: #67e8f9; --gold-bright: #3ad6f0;
+  --gold-soft: rgba(34,211,238,0.16); --gold-line: rgba(34,211,238,0.45); --gold-ink: #05333f;
+  --bg: #06151c; --bg-2: #0c2430;
+  --surface: #0c2430; --surface-2: #11303f; --surface-3: #18404f;
+  --line: #14303e; --line-strong: #1c404f;
+  --text: #e5f4fa; --text-2: #86b5c9; --text-3: #5b8394;
+  --code-bg: #06151c;
+}
+.fm.fm-t-crimson {
+  --gold: #e0524f; --gold-strong: #fca5a5; --gold-bright: #f87171;
+  --gold-soft: rgba(248,113,113,0.16); --gold-line: rgba(248,113,113,0.45); --gold-ink: #3d0b0b;
+  --bg: #1a0a0a; --bg-2: #261111;
+  --surface: #261111; --surface-2: #331818; --surface-3: #402020;
+  --line: #331717; --line-strong: #462020;
+  --text: #fbeaea; --text-2: #c98f8f; --text-3: #996868;
+  --code-bg: #1a0a0a;
+}
+.fm.fm-t-rose {
+  --gold: #ec6cb0; --gold-strong: #f9a8d4; --gold-bright: #f472b6;
+  --gold-soft: rgba(244,114,182,0.16); --gold-line: rgba(244,114,182,0.45); --gold-ink: #3c0a26;
+  --bg: #170712; --bg-2: #22101a;
+  --surface: #22101a; --surface-2: #2e1624; --surface-3: #3a1d2e;
+  --line: #2d1626; --line-strong: #3e2033;
+  --text: #f9eaf3; --text-2: #c78ca9; --text-3: #966781;
+  --code-bg: #170712;
+}
+.fm.fm-t-slate {
+  --gold: #94a3b8; --gold-strong: #cbd5e1; --gold-bright: #a9b7c9;
+  --gold-soft: rgba(148,163,184,0.16); --gold-line: rgba(148,163,184,0.45); --gold-ink: #101822;
+  --bg: #0e1318; --bg-2: #151c23;
+  --surface: #151c23; --surface-2: #1c2530; --surface-3: #24303c;
+  --line: #1e272f; --line-strong: #2a3642;
+  --text: #e3e8ee; --text-2: #95a0ad; --text-3: #66717e;
+  --code-bg: #0e1318;
+}
+.fm.fm-t-mint {
+  --gold: #6fd99a; --gold-strong: #bef264; --gold-bright: #86efac;
+  --gold-soft: rgba(134,239,172,0.16); --gold-line: rgba(134,239,172,0.45); --gold-ink: #052e16;
+  --bg: #081208; --bg-2: #0f1f12;
+  --surface: #0f1f12; --surface-2: #152e1a; --surface-3: #1c3c22;
+  --line: #173321; --line-strong: #20492c;
+  --text: #e9f6ec; --text-2: #8db996; --text-3: #5f8c68;
+  --code-bg: #081208;
+}
+.fm.fm-t-neon {
+  --gold: #c93df0; --gold-strong: #67e8f9; --gold-bright: #e879f9;
+  --gold-soft: rgba(232,121,249,0.16); --gold-line: rgba(232,121,249,0.45); --gold-ink: #2e0540;
+  --bg: #0a0414; --bg-2: #180a2c;
+  --surface: #180a2c; --surface-2: #21103f; --surface-3: #2a174f;
+  --line: #261244; --line-strong: #351b5c;
+  --text: #f0e7ff; --text-2: #a78fd8; --text-3: #7359a8;
+  --code-bg: #0a0414;
+}
 
 /* ============================================================
    Mobile-responsive Create Server wizard

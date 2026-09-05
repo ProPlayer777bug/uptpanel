@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { api } from './client'
 import type { Server, Node, Location, Blueprint } from '@uptimehost/types'
 
-export function usePoll<T>(fetcher: () => Promise<T>, deps: unknown[] = [], interval = 8000, enabled = true) {
+export function usePoll<T>(fetcher: () => Promise<T>, deps: unknown[] = [], interval = 100, enabled = true) {
   const [data, setData] = useState<T | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
@@ -66,7 +66,7 @@ export function useServers() {
 }
 
 export function useNodes(enabled = true) {
-  const { data, ...rest } = usePoll<{ nodes: Node[]; locations: Location[] }>(async () => api.get('/nodes'), [], 8000, enabled)
+  const { data, ...rest } = usePoll<{ nodes: Node[]; locations: Location[] }>(async () => api.get('/nodes'), [], 100, enabled)
   return { nodes: data?.nodes ?? [], locations: data?.locations ?? [], ...rest }
 }
 
@@ -84,12 +84,12 @@ export function useServer(id: string | undefined) {
   return usePoll<{ server: Server }>(
     async () => api.get(`/servers/${id}`),
     [id],
-    id ? 6000 : 0,
+    id ? 100 : 0,
   )
 }
 
 export function useActivity(limit = 20) {
-  return usePoll<{ activity: any[] }>(async () => api.get(`/activity?limit=${limit}`), [limit], 10000)
+  return usePoll<{ activity: any[] }>(async () => api.get(`/activity?limit=${limit}`), [limit], 100)
 }
 
 export async function powerAction(id: string, action: 'start' | 'stop' | 'restart' | 'kill') {

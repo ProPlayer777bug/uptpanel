@@ -29,9 +29,10 @@ const PORT = Number(process.env.UH_API_PORT || 8081)
 const PAPER_21_11_JAR =
   'https://fill-data.papermc.io/v1/objects/5ffef465eeeb5f2a3c23a24419d97c51afd7dbb4923ff42df9a3f58bba1ccfba/paper-1.21.11-132.jar'
 
-// Tracks servers for which the panel has already auto-accepted the Minecraft
-// EULA during this process lifetime, so we only write eula=true once per boot.
-const autoEulaAccepted = new Set<string>()
+// EULA is accepted intentionally by the operator, never silently. This map
+// throttles how often the console re-asks "type true" when the server keeps
+// printing the EULA refusal (one nudge per server per 30s is enough).
+const eulaPromptAt: Record<string, number> = {}
 
 // Trust the reverse proxy (nginx) so X-Forwarded-Proto/Host are honored when
 // deriving the public base URL for OAuth redirects. UH_PANEL_URL also takes
@@ -104,7 +105,9 @@ const hub = new WsHub((user, topic) => {
 
 await app.register(cors, { origin: ['https://panel.uptimehost.in', 'https://gp.uptimehost.in', 'https://panel.gp.uptimehost.in', 'https://gp1.uptimehost.in'], methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE'] })
 await app.register(rateLimit, {
-  max: 600,
+  // Generous limit: live panels poll every 100ms (10 req/s per field) across
+  // server list, detail and stats while staying usable behind Cloudflare.
+  max: 6000,
   timeWindow: '1 minute',
   // Key on the edge-verified client IP (set by Cloudflare, forwarded by nginx)
   // so an attacker cannot rotate X-Forwarded-For to dodge the limit. Fall back
@@ -1569,7 +1572,7 @@ app.post('/api/servers/:id/version', async (req, reply) => {
   const wasRunning = server.state !== 'offline' && server.state !== 'stopping' && server.state !== 'suspended'
   server.state = 'restarting'
   store.persist()
-  hub.to(`srv:${id}`, { type: 'server-update', data: server })
+  broadcastServer(`srv:${id}`, server, user)
   pushTerminal(id, `[version] switching to ${resolved.platform || ''} ${resolved.name} — replacing server.jar ...`, 'warn')
   try {
     // Replace only the server.jar (world/plugins preserved), then update the
@@ -1601,7 +1604,7 @@ app.post('/api/servers/:id/version', async (req, reply) => {
     pushTerminal(id, `[version] now on ${resolved.name} — server ready to start`, 'info')
     activity(user, 'server', 'info', `Changed ${server.name} to Minecraft ${resolved.name}`, { serverId: id })
     audit(store, user.name, 'CHANGE_VERSION', `server:${server.name} -> ${resolved.name}`)
-    hub.to(`srv:${id}`, { type: 'server-update', data: server })
+    broadcastServer(`srv:${id}`, server, user)
     return { ok: true, server: withRelations(server) }
   } catch (e: any) {
     // A failed version swap must not brick the server: keep it recoverable.
@@ -1609,7 +1612,7 @@ app.post('/api/servers/:id/version', async (req, reply) => {
     server.error = String(e?.message || e)
     server.startedAt = null
     store.persist()
-    hub.to(`srv:${id}`, { type: 'server-update', data: server })
+    broadcastServer(`srv:${id}`, server, user)
     return reply.code(500).send({ ok: false, error: 'VERSION_CHANGE_FAILED', message: String(e?.message || e) })
   }
 })
@@ -1655,7 +1658,14 @@ function withRelations(s: any, user?: any) {
   const node = store.db.nodes.find((n) => n.id === s.nodeId)
   const bp = store.db.blueprints.find((b) => b.id === s.blueprintId)
   const acc = user ? serverAccess(user, s, store) : { ok: false, permissions: {} }
-  return { ...s, node: node ? { id: node.id, name: node.name, host: node.host, status: node.status, agentUrl: node.agentUrl } : null, blueprint: bp, permissions: acc.permissions, role: yourRole(user, s) }
+  const isAdmin = user ? isGlobalAdmin(user) : false
+  // External-facing node view exposes only what any server-owner/viewer needs:
+  // the node's public host for building the connect address. Internal detail
+  // (agentUrl/location/ports/memory/disk/status) and even the node display name
+  // are admin-only — customers never see internal node plumbing. The full node
+  // row is exposed only to admins via nodeInternal.
+  const nodeView = node ? { id: node.id, host: node.host, ...(isAdmin ? { name: node.name } : {}) } : null
+  return { ...s, node: nodeView, blueprint: bp, permissions: acc.permissions, role: yourRole(user, s) }
 }
 
 // Non-admin users only see servers they have been granted access to (or own).
@@ -1832,14 +1842,14 @@ function launch(server: any, client: AgentClient, manifest: any, user: any) {
         server.installed = true
         server.state = 'offline'
         store.persist()
-        hub.to(`srv:${server.id}`, { type: 'server-update', data: server })
+        broadcastServer(`srv:${server.id}`, server, user)
         activity(user, 'server', 'info', `${server.name} provisioned — ready to start`, { serverId: server.id })
       } catch (e: any) {
         server.state = 'error'
         server.error = String(e?.message || e)
         store.persist()
         pushTerminal(server.id, `[control] ERROR: ${server.error}`)
-        hub.to(`srv:${server.id}`, { type: 'server-update', data: server })
+        broadcastServer(`srv:${server.id}`, server, user)
         activity(user, 'server', 'error', `Failed to provision ${server.name}`, { serverId: server.id })
       }
       return
@@ -1868,7 +1878,7 @@ app.post('/api/servers/:id/power', async (req, reply) => {
   }
   server.state = pending
   store.persist()
-  hub.to(`srv:${id}`, { type: 'server-update', data: server })
+  broadcastServer(`srv:${id}`, server, user)
   pushTerminal(id, `[control] ${action} requested`)
   try {
     if (action === 'start') {
@@ -1895,7 +1905,7 @@ app.post('/api/servers/:id/power', async (req, reply) => {
     if (action === 'restart') server.state = 'running'
     server.lastAction = action
     store.persist()
-    hub.to(`srv:${id}`, { type: 'server-update', data: server })
+    broadcastServer(`srv:${id}`, server, user)
     activity(user, 'server', 'info', `${server.name} ${action}`, { serverId: id })
     audit(store, user.name, 'POWER', `${action}:${server.name}`)
     return { ok: true, server: withRelations(server) }
@@ -1903,7 +1913,7 @@ app.post('/api/servers/:id/power', async (req, reply) => {
     server.state = 'error'
     server.error = String(e?.message || e)
     store.persist()
-    hub.to(`srv:${id}`, { type: 'server-update', data: server })
+    broadcastServer(`srv:${id}`, server, user)
     pushTerminal(id, `[control] ERROR: ${server.error}`)
     return reply.code(500).send({ ok: false, error: 'POWER_FAILED', message: String(e?.message || e) })
   }
@@ -1986,7 +1996,7 @@ app.post('/api/servers/:id/allocations', async (req, reply) => {
     try { await client.openFirewall(server.id, alloc.port) } catch (e: any) { /* best-effort */ }
   }
 
-  hub.to(`srv:${id}`, { type: 'server-update', data: server })
+  broadcastServer(`srv:${id}`, server, user)
   activity(user, 'server', 'info', `Added port ${alloc.port} to ${server.name}`, { serverId: id })
   audit(store, user.name, 'ADD_ALLOCATION', `${server.name}:+${alloc.port}`)
   return { ok: true, allocations: server.allocations, server: withRelations(server) }
@@ -2014,7 +2024,7 @@ app.delete('/api/servers/:id/allocations/:allocId', async (req, reply) => {
     try { await client.closeFirewall(server.id, alloc.port) } catch { /* best-effort */ }
   }
 
-  hub.to(`srv:${id}`, { type: 'server-update', data: server })
+  broadcastServer(`srv:${id}`, server, user)
   activity(user, 'server', 'info', `Removed port ${alloc.port} from ${server.name}`, { serverId: id })
   audit(store, user.name, 'REMOVE_ALLOCATION', `${server.name}:-${alloc.port}`)
   return { ok: true, allocations: server.allocations, server: withRelations(server) }
@@ -2041,7 +2051,7 @@ async function reconcileServers(node: any) {
         if (!running) server.startedAt = null
         if (running && !server.startedAt) server.startedAt = Date.now()
         store.persist()
-        hub.to(`srv:${server.id}`, { type: 'server-update', data: server })
+        broadcastServer(`srv:${server.id}`, server, undefined)
       }
     }
   } catch { /* node down */ }
@@ -2381,7 +2391,7 @@ app.post('/api/servers/:id/backups', async (req, reply) => {
       pushTerminal(id, `[backup] ${backup.name} failed: ${backup.error}`, 'error')
     }
     store.persist()
-    hub.to(`srv:${id}`, { type: 'server-update', data: server })
+    broadcastServer(`srv:${id}`, server, user)
   })()
 
   return reply.code(201).send({ ok: true, backup })
@@ -2531,7 +2541,7 @@ app.post('/api/servers/:id/reinstall', async (req, reply) => {
   if (!client) return reply.code(409).send({ ok: false, error: 'NODE_UNREACHABLE' })
   server.state = 'restarting'
   store.persist()
-  hub.to(`srv:${id}`, { type: 'server-update', data: server })
+  broadcastServer(`srv:${id}`, server, user)
   pushTerminal(id, '[reinstall] wiping data and rebuilding ...', 'warn')
   try {
     await client.reinstall(server.id)
@@ -2540,7 +2550,7 @@ app.post('/api/servers/:id/reinstall', async (req, reply) => {
     server.state = 'offline'
     server.installed = true
     store.persist()
-    hub.to(`srv:${id}`, { type: 'server-update', data: server })
+    broadcastServer(`srv:${id}`, server, user)
     pushTerminal(id, '[reinstall] complete — clean rebuild ready', 'info')
     activity(user, 'server', 'info', `Reinstalled ${server.name}`, { serverId: id })
     audit(store, user.name, 'REINSTALL_SERVER', `server:${server.name}`)
@@ -2549,7 +2559,7 @@ app.post('/api/servers/:id/reinstall', async (req, reply) => {
     server.state = 'error'
     server.error = String(e?.message || e)
     store.persist()
-    hub.to(`srv:${id}`, { type: 'server-update', data: server })
+    broadcastServer(`srv:${id}`, server, user)
     return reply.code(500).send({ ok: false, error: 'REINSTALL_FAILED', message: String(e?.message || e) })
   }
 })
@@ -2992,12 +3002,13 @@ async function seedServerFiles(server: any, client: AgentClient) {
   const files = defaults[server.blueprintId] || {}
 
   // Minecraft catalog blueprints: install the real server.jar for the server's
-  // pinned version, plus the EULA agreement and a server.properties bound to
-  // the server's first port (Pterodactyl-style).
+  // pinned version, plus a server.properties bound to the server's first port
+  // (Pterodactyl-style). The EULA is deliberately NOT pre-accepted: a fresh
+  // server refuses to start until the operator types "true" in the console
+  // (see the interactive EULA flow in the console WebSocket handler).
   if (server.blueprintId === 'bp-minecraft' || server.blueprintId === 'bp-paper') {
     const port = (server.allocations && server.allocations[0]?.port) || 25565
     try { await client.downloadFile(server.id, 'server.jar', await resolveServerJar(server)) } catch { /* best-effort */ }
-    files['eula.txt'] = 'eula=true\n'
     files['server.properties'] = [
       'server-port=' + port,
       'online-mode=true',
@@ -3012,6 +3023,15 @@ async function seedServerFiles(server: any, client: AgentClient) {
   for (const [path, content] of Object.entries(files)) {
     try { await client.writeFile(server.id, path, content) } catch { /* best-effort */ }
   }
+}
+
+// Broadcast a sanitized server-update to the srv topic. The raw server row holds
+// admin-only fields (node agentUrl, state machines, etc.); sending it verbatim
+// would leak internal node info to customers. Every receiver gets the same safe
+// view (no node name / agentUrl / role), because the payload is serialized once
+// for the whole topic — live clients re-fetch richer detail over HTTP.
+function broadcastServer(topic: string, s: any, _user?: any) {
+  hub.to(topic, { type: 'server-update', data: withRelations(s, undefined) })
 }
 
 function pushTerminal(serverId: string, text: string, level: 'plain' | 'info' | 'warn' | 'error' = 'plain') {
@@ -3262,6 +3282,43 @@ app.register(async (app) => {
   // The daemon speaks the Wings websocket JSON protocol, which we transparently
   // translate to/from the browser's lightweight {type,line} frames.
 
+  // Explicit user consent (typing "true" in the console command box) writes
+  // eula.txt=true into the container's data dir, then starts it if it isn't
+  // running (or restarts a container stuck at the EULA prompt). Mirrors what a
+  // real Minecraft console asks the operator to do — never done automatically.
+  async function acceptEula(server: any, node: any, socket: any, user: any) {
+    const client = agentFor(node)
+    if (!client) {
+      socket.send(JSON.stringify({ type: 'status', line: 'Agent unreachable — cannot accept EULA.' }))
+      return
+    }
+    try {
+      await client.writeFile(server.id, 'eula.txt', 'eula=true\n')
+    } catch (e: any) {
+      socket.send(JSON.stringify({ type: 'status', line: 'Failed to write eula.txt: ' + (e?.message || 'unknown') }))
+      return
+    }
+    pushTerminal(server.id, '[eula] EULA accepted (eula=true) — restarting', 'warn')
+    socket.send(JSON.stringify({ type: 'system', line: 'EULA accepted (eula=true) — restarting server…' }))
+    socket.send(JSON.stringify({ type: 'eula-accepted' }))
+    if (server.state === 'running' || server.state === 'starting' || server.state === 'restarting') {
+      // Container is up but the JVM exited at the EULA prompt (or is looping);
+      // restart it so the freshly written consent takes effect.
+      try { await client.power(server.id, 'restart') } catch { /* reconciled shortly */ }
+    } else {
+      try {
+        await client.power(server.id, 'start')
+        server.state = 'running'
+        server.startedAt = Date.now()
+        store.persist()
+        broadcastServer(`srv:${server.id}`, server, user)
+      } catch (e: any) {
+        socket.send(JSON.stringify({ type: 'status', line: 'Failed to start server: ' + (e?.message || 'unknown') }))
+      }
+    }
+    audit(store, user?.name || 'console', 'EULA_ACCEPT', `server:${server.name}`)
+  }
+
   app.get('/ws/server/:id/console', { websocket: true }, (socket, req) => {
     // Browser WS handshakes cannot set an Authorization header, so accept the
     // session token from the ?token= query param (same as the realtime /ws).
@@ -3293,7 +3350,10 @@ app.register(async (app) => {
         const ev = wingsMsg.event || ''
         if (ev === 'console output') {
           // Forward every line the daemon emits, unfiltered, so the console is
-          // a complete feed including boot/Unpacking/JVM startup output.
+          // a complete feed including boot/Unpacking/JVM startup output. Also
+          // persist into the terminal ring so a freshly-opened/refreshed
+          // console can replay recent scrollback via /terminal.
+          pushTerminal(server.id, line)
           socket.send(JSON.stringify({ type: 'log', line }))
         } else if (ev === 'status') {
           socket.send(JSON.stringify({ type: 'status', line: `Server marked as ${line}` }))
@@ -3307,30 +3367,20 @@ app.register(async (app) => {
       } else {
         socket.send(String(data))
       }
-      // Auto EULA acceptor: Minecraft refuses to start until eula.txt agrees.
-      // When the console stream flags the EULA prompt we write eula=true into
-      // the container's workdir (once per server) and restart it if stopped.
+      // EULA handling is intentionally interactive: when Minecraft refuses to
+      // start because eula.txt isn't accepted, we ASK the operator to type
+      // "true" in the console command box (real-console behaviour). We never
+      // write eula=true on their behalf without that explicit command.
       const raw = String(data)
       const lower = raw.toLowerCase()
       const isEulaPrompt = lower.includes('eula') && (lower.includes('agree') || lower.includes('eula.txt') || lower.includes('accept the eula'))
-      if (isEulaPrompt && !autoEulaAccepted.has(server.id)) {
-        autoEulaAccepted.add(server.id)
-        socket.send(JSON.stringify({ type: 'status', line: 'Auto-accepting Minecraft EULA (eula=true)…' }))
-        const client = agentFor(node)
-        client?.command(server.id, 'echo eula=true > eula.txt').then(async () => {
-          socket.send(JSON.stringify({ type: 'status', line: 'EULA accepted — restarting server' }))
-          if (server.state === 'offline' || server.state === 'error') {
-            try {
-              await client.power(server.id, 'start')
-              server.state = 'running'
-              server.startedAt = Date.now()
-              store.persist()
-              hub.to(`srv:${server.id}`, { type: 'server-update', data: server })
-            } catch { /* container already starting — reconciled shortly */ }
-          }
-        }).catch((e: any) => {
-          socket.send(JSON.stringify({ type: 'status', line: 'EULA auto-accept failed: ' + (e?.message || 'unknown') }))
-        })
+      if (isEulaPrompt && (eulaPromptAt[server.id] || 0) < Date.now() - 30000) {
+        eulaPromptAt[server.id] = Date.now()
+        socket.send(JSON.stringify({
+          type: 'system',
+          line: 'Minecraft EULA required — type "true" in the command box to accept and start the server.',
+        }))
+        socket.send(JSON.stringify({ type: 'eula-required' }))
       }
     })
     agent.on('close', () => socket.send(JSON.stringify({ type: 'status', line: 'console detached' })))
@@ -3343,6 +3393,14 @@ app.register(async (app) => {
         if (m && typeof m.line === 'string') {
           if (!acc.permissions.command) return
           if (m.type === 'command') {
+            // Type "true" in the console = explicit EULA acceptance (the same
+            // step every Minecraft server asks for). Write eula.txt=true and
+            // start/restart the container so it boots past the prompt. No
+            // arbitrary shell execution — it's a reserved consent command.
+            if (/^\s*true\s*$/i.test(m.line)) {
+              acceptEula(server, node, socket, user)
+              return
+            }
             agent.send(JSON.stringify({ event: 'send command', args: [m.line] }))
             return
           }

@@ -38,15 +38,60 @@ type Message struct {
 	Args  []string `json:"args,omitempty"`
 }
 
+// connEntry holds per-connection console state: the cancel function of the
+// active log-follow stream (re-anchored on every container start/restart) and
+// a write lock so concurrent stream goroutines never trample each other's
+// websocket frames.
+type connEntry struct {
+	base   context.Context
+	cancel context.CancelFunc
+	wmu    sync.Mutex
+}
+
 type Hub struct {
 	dm  *docker.Client
 	mu  sync.Mutex
 	// conns tracks active console connections per container id.
-	conns map[string]map[*websocket.Conn]struct{}
+	conns map[string]map[*websocket.Conn]*connEntry
 }
 
 func NewHub(dm *docker.Client) *Hub {
-	return &Hub{dm: dm, conns: map[string]map[*websocket.Conn]struct{}{}}
+	return &Hub{dm: dm, conns: map[string]map[*websocket.Conn]*connEntry{}}
+}
+
+// OnPower re-anchors the live log stream for every connected console of the
+// given server after the container is (re)started. The panel triggers power
+// actions over REST (not the console websocket), so the daemon instead of the
+// client is what re-installs the follow — otherwise docker's log stream ends
+// when the previous container stops and the reboot output never surfaces.
+func (h *Hub) OnPower(serverID string) {
+	h.mu.Lock()
+	conns := make([]*websocket.Conn, 0, len(h.conns[serverID]))
+	for c := range h.conns[serverID] {
+		conns = append(conns, c)
+	}
+	h.mu.Unlock()
+	for _, ws := range conns {
+		e := h.entry(ws)
+		if e == nil {
+			continue
+		}
+		e.wmu.Lock()
+		h.startStream(serverID, ws, e)
+		e.wmu.Unlock()
+	}
+}
+
+// entry returns the connEntry for ws, or nil when ws isn't tracked.
+func (h *Hub) entry(ws *websocket.Conn) *connEntry {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	for _, conns := range h.conns {
+		if e, ok := conns[ws]; ok {
+			return e
+		}
+	}
+	return nil
 }
 
 func (h *Hub) Serve(serverID string, ws *websocket.Conn) {
@@ -55,9 +100,9 @@ func (h *Hub) Serve(serverID string, ws *websocket.Conn) {
 	subKey := serverID
 	h.mu.Lock()
 	if h.conns[subKey] == nil {
-		h.conns[subKey] = map[*websocket.Conn]struct{}{}
+		h.conns[subKey] = map[*websocket.Conn]*connEntry{}
 	}
-	h.conns[subKey][ws] = struct{}{}
+	h.conns[subKey][ws] = &connEntry{}
 	h.mu.Unlock()
 	defer func() {
 		h.mu.Lock()
@@ -70,10 +115,9 @@ func (h *Hub) Serve(serverID string, ws *websocket.Conn) {
 	baseCtx, baseCancel := context.WithCancel(context.Background())
 	defer baseCancel()
 
-	// cancelHolder lets restartStream cancel the active follow stream and
-	// install a fresh one without leaking the previous context.
-	var cancelHolder context.CancelFunc
-	h.startStream(baseCtx, serverID, ws, &cancelHolder)
+	e := h.entry(ws)
+	e.base = baseCtx
+	h.startStream(serverID, ws, e)
 
 	for {
 		_, data, err := ws.ReadMessage()
@@ -117,7 +161,10 @@ func (h *Hub) Serve(serverID string, ws *websocket.Conn) {
 				// container is (re)started, re-anchor the log stream so the
 				// boot output keeps flowing (Wings re-emits on start).
 				if a == "start" || a == "restart" {
-					h.startStream(baseCtx, serverID, ws, &cancelHolder)
+					e := h.entry(ws)
+					e.wmu.Lock()
+					h.startStream(serverID, ws, e)
+					e.wmu.Unlock()
 				}
 			}(action)
 		case sendCommand:
@@ -160,15 +207,22 @@ func (h *Hub) Serve(serverID string, ws *websocket.Conn) {
 // so the boot sequence keeps surfacing. No lines are filtered: everything the
 // server emits (including boot/Unpacking/JVM lines) reaches the client so the
 // console is a complete, unfiltered feed.
-func (h *Hub) startStream(baseCtx context.Context, serverID string, ws *websocket.Conn, cancelHolder *context.CancelFunc) {
-	if *cancelHolder != nil {
-		(*cancelHolder)()
+func (h *Hub) startStream(serverID string, ws *websocket.Conn, e *connEntry) {
+	if e.cancel != nil {
+		e.cancel()
 	}
-	ctx, cancel := context.WithCancel(baseCtx)
-	*cancelHolder = cancel
+	parent := context.Background()
+	if e.base != nil {
+		parent = e.base
+	}
+	ctx, cancel := context.WithCancel(parent)
+	e.cancel = cancel
 	go func() {
 		err := h.dm.StreamLogs(ctx, serverID, "200", "", func(line []byte) {
-			h.send(ws, Message{Event: consoleOut, Args: []string{string(line)}})
+			e.wmu.Lock()
+			defer e.wmu.Unlock()
+			_ = ws.SetWriteDeadline(time.Now().Add(5 * time.Second))
+			_ = ws.WriteJSON(Message{Event: consoleOut, Args: []string{string(line)}})
 		})
 		if ctx.Err() != nil {
 			return
@@ -196,6 +250,11 @@ func (h *Hub) state(serverID string) string {
 }
 
 func (h *Hub) send(ws *websocket.Conn, m Message) {
+	e := h.entry(ws)
+	if e != nil {
+		e.wmu.Lock()
+		defer e.wmu.Unlock()
+	}
 	_ = ws.SetWriteDeadline(time.Now().Add(5 * time.Second))
 	_ = ws.WriteJSON(m)
 }

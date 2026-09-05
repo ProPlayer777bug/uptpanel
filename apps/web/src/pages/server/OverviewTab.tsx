@@ -18,7 +18,7 @@ export function OverviewTab({ server }: { server: Server }) {
 
   const fetchStats = () => api.get(`/servers/${server.id}/stats`).then((d) => d.stats && setStats(d.stats)).catch(() => {})
   useEffect(() => { fetchStats() }, [server.id])
-  useEffect(() => { if (!connected) return; const t = setTimeout(fetchStats, 6000); return () => clearTimeout(t) }, [connected, server.id])
+  useEffect(() => { if (!connected) return; const t = setInterval(fetchStats, 100); return () => clearInterval(t) }, [connected, server.id])
 
   const cpu = Math.round((stats.cpuPercent || 0) * 100) / 100
   const memPct = stats.memoryPercent != null ? Math.round(stats.memoryPercent * 100) : null
@@ -79,7 +79,7 @@ export function OverviewTab({ server }: { server: Server }) {
               <InfoRow k="Blueprint" v={server.blueprint?.name || '—'} />
               <InfoRow k="Runtime" v={<div className="sm">{friendlyRuntime(server.blueprint?.image)}</div>} />
               <InfoRow k="Startup" v={<div className="sm">{friendlyStartup(server.blueprint?.startup)}</div>} />
-              <InfoRow k="Node" v={server.node?.name || '—'} />
+              {server.role === 'admin' && <InfoRow k="Node" v={server.node?.name || '—'} />}
               <InfoRow k="Disk" v={`${server.storageGb} GB`} />
               <InfoRow k="Created" v={new Date(server.createdAt).toLocaleString()} />
             </div>

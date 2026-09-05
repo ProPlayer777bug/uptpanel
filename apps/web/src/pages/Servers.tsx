@@ -117,7 +117,7 @@ export function Servers() {
       ) : view === 'grid' ? (
         <div className="server-grid anim-in">
           {filtered.map((s) => (
-            <ServerCard key={s.id} server={s} selected={sel.has(s.id)} onSelect={() => toggleOne(s.id)} onOpen={() => navigate(`/servers/${s.id}`)} />
+            <ServerCard key={s.id} server={s} admin={canAdmin} selected={sel.has(s.id)} onSelect={() => toggleOne(s.id)} onOpen={() => navigate(`/servers/${s.id}`)} />
           ))}
         </div>
       ) : (
@@ -132,7 +132,7 @@ export function Servers() {
                 <th onClick={() => setSort('state')}>State</th>
                 <th>Blueprint</th>
                 <th>Version</th>
-                <th>Node</th>
+                {canAdmin && <th>Node</th>}
                 <th onClick={() => setSort('cpu')}>CPU</th>
                 <th onClick={() => setSort('mem')}>Memory</th>
                 <th>Disk</th>
@@ -150,7 +150,7 @@ export function Servers() {
                   <td><StatePill state={s.state} pulse /></td>
                   <td>{s.blueprint?.name || '—'}</td>
                   <td>{s.mcVersion || '—'}</td>
-                  <td>{s.node?.name || '—'}</td>
+                  {canAdmin && <td>{s.node?.name || '—'}</td>}
                   <td>
                     <MiniBar pct={s.cpuPercent} color="var(--cyan)" label={`${s.cpuPercent}%`} />
                   </td>
@@ -193,7 +193,7 @@ function MiniBar({ pct, color, label }: { pct: number; color: string; label: str
   )
 }
 
-function ServerCard({ server, selected, onSelect, onOpen }: { server: any; selected: boolean; onSelect: () => void; onOpen: () => void }) {
+function ServerCard({ server, admin, selected, onSelect, onOpen }: { server: any; admin: boolean; selected: boolean; onSelect: () => void; onOpen: () => void }) {
   const memPct = barPct((server.memoryMb / (server.memoryLimitMb || 1)) * 100)
   return (
     <div className={`server-card ${selected ? 'selected' : ''}`}>
@@ -207,7 +207,7 @@ function ServerCard({ server, selected, onSelect, onOpen }: { server: any; selec
       </div>
       <div className="server-card-body" onClick={onOpen}>
         <div className="flex items-center gap-2"><StatePill state={server.state} pulse /></div>
-        <div className="sc-line"><span>Node</span><b>{server.node?.name || '—'}</b></div>
+        {admin && <div className="sc-line"><span>Node</span><b>{server.node?.name || '—'}</b></div>}
         <div className="sc-line"><span>CPU</span><b>{server.cpuPercent}%</b></div>
         <div className="sc-line"><span>RAM</span><b>{server.memoryMb}/{server.memoryLimitMb}MB</b></div>
         <div className="sc-line"><span>Disk</span><b>{server.storageGb}GB</b></div>

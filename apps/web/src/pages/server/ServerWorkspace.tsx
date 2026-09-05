@@ -96,7 +96,7 @@ export function ServerWorkspace() {
             <span className="badge mono xs"><Icon name="node" size={11} /> {address}</span>
             {server.blueprint && <span className="badge blue xs">{server.blueprint.name}</span>}
             {server.mcVersion && <span className="badge cyan xs">MC {server.mcVersion}</span>}
-            {server.node && <span className="badge cyan xs"><Icon name="node" size={11} /> {server.node.name}</span>}
+            {role === 'admin' && server.node && <span className="badge cyan xs"><Icon name="node" size={11} /> {server.node.name}</span>}
             {server.error && <span className="badge red xs">{server.error}</span>}
           </div>
         </div>

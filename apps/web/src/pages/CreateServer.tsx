@@ -34,7 +34,7 @@ export function CreateServer({ onClose }: { onClose: () => void }) {
   const [mem, setMem] = useState('')
   const [disk, setDisk] = useState('')
   const [cpuCores, setCpuCores] = useState('')
-  const [step, setStep] = useState<Step>('node')
+  const [step, setStep] = useState<Step>('name')
   const [busy, setBusy] = useState(false)
   const [userQuery, setUserQuery] = useState('')
   const [selectedUsers, setSelectedUsers] = useState<string[]>([])
@@ -53,8 +53,6 @@ export function CreateServer({ onClose }: { onClose: () => void }) {
   useEffect(() => {
     if (blueprints.length && !bpId) setBpId(blueprints[0].id)
     if (!node && online.length) setNode(online[0])
-    // NOTE: removed setStep('name') which was forcibly resetting the step
-    // on every dependency change, causing the navigation loop you observed.
   }, [blueprints, online, node, bpId])
 
   const bp: Blueprint | undefined = blueprints.find((b) => b.id === bpId)
@@ -325,7 +323,7 @@ export function CreateServer({ onClose }: { onClose: () => void }) {
       )}
 
       <div className="actions" style={{ marginTop: 20 }}>
-        <button className="btn" onClick={() => (step === 'node' ? onClose() : prev())}>Back</button>
+        <button className="btn" onClick={() => (step === 'name' ? onClose() : prev())}>Back</button>
         <div style={{ flex: 1 }} />
         <button className="btn" onClick={onClose}>Cancel</button>
         <button className="btn primary" onClick={next} disabled={busy || !canNext}>

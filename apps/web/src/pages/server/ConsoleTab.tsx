@@ -8,9 +8,11 @@ import { publicAddress } from '../../utils/mask'
 import type { Server } from '@uptimehost/types'
 
 interface Line { id: number; kind: 'out' | 'in' | 'sys'; text: string; ts: number }
-interface ConsoleMsg { type: 'log' | 'input' | 'status' | 'system'; line: string }
+interface ConsoleMsg { type: 'log' | 'input' | 'status' | 'system' | 'eula-required' | 'eula-accepted'; line?: string }
 
 let seq = 0
+
+const MAX_LINES = 1000
 
 const MC: Record<string, string> = {
   '0': '#000000', '1': '#0000AA', '2': '#00AA00', '3': '#00AAAA', '4': '#AA0000',
@@ -56,6 +58,15 @@ function escapeHtml(s: string) {
   return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
 }
 
+// Rendered output is cached per line id so frequent re-renders of the console
+// (which happens on every batch flush) never re-split/re-escape old lines.
+const _htmlCache = new Map<number, string>()
+function cachedHtml(id: number, text: string): string {
+  let h = _htmlCache.get(id)
+  if (h === undefined) { h = renderMC(text).html; _htmlCache.set(id, h) }
+  return h
+}
+
 function fmtUptime(startedAt: number | null | undefined): string {
   if (!startedAt) return '—'
   const ms = Math.max(0, Date.now() - startedAt)
@@ -81,12 +92,15 @@ export function ConsoleTab({ server }: { server: Server }) {
   const [showSearch, setShowSearch] = useState(false)
   const [fullscreen, setFullscreen] = useState(false)
   const [liveStats, setLiveStats] = useState<{ cpuPercent?: number; memoryUsedMb?: number; pids?: number }>({})
+  const [eulaPending, setEulaPending] = useState(false)
   const [powerBusy, setPowerBusy] = useState(false)
   const [showKillConfirm, setShowKillConfirm] = useState(false)
   const { refresh } = useApp()
   const pendingRef = useRef<Line[]>([])
   const wsRef = useRef<WebSocket | null>(null)
   const boxRef = useRef<HTMLDivElement>(null)
+  const atBottomRef = useRef(true)
+  const [showJump, setShowJump] = useState(false)
   const searchRef = useRef<HTMLInputElement>(null)
   const alive = useRef(true)
   const pausedRef = useRef(paused)
@@ -108,49 +122,69 @@ export function ConsoleTab({ server }: { server: Server }) {
     }
   }
 
-  // Message rate tracking for aggressive cleanup
-  const msgCountRef = useRef(0)
-  const msgTimeRef = useRef(Date.now())
-  const cleanupIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null)
+  // Live lines are batched (flushed a few times/sec) so a rapid console burst
+  // doesn't trigger a React re-render per line, and scrollback only evicts the
+  // oldest lines once the cap is reached — nothing is dropped mid-stream.
+  const queueRef = useRef<Line[]>([])
+  const flushTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const linesRef = useRef<Line[]>([])
+
+  const flushBatch = useCallback(() => {
+    flushTimerRef.current = null
+    if (!queueRef.current.length) return
+    const batch = queueRef.current
+    queueRef.current = []
+    setLines((prev) => {
+      const next = [...prev, ...batch]
+      return next.length > MAX_LINES ? next.slice(-MAX_LINES) : next
+    })
+  }, [])
 
   const add = useCallback((l: { kind: 'out' | 'in' | 'sys'; text: string }) => {
     if (!alive.current) return
     const line: Line = { ...l, id: ++seq, ts: Date.now() }
     if (pausedRef.current) { pendingRef.current.push(line); return }
-    
-    // Track message rate for aggressive cleanup
-    const now = Date.now()
-    if (now - msgTimeRef.current > 1000) {
-      msgCountRef.current = 0
-      msgTimeRef.current = now
-    }
-    msgCountRef.current++
-    
-    setLines((prev) => {
-      let next = [...prev, line]
-      // Keep max 500 lines
-      if (next.length > 500) next = next.slice(-500)
-      return next
-    })
-  }, [])
+    queueRef.current.push(line)
+    if (!flushTimerRef.current) flushTimerRef.current = setTimeout(flushBatch, 120)
+  }, [flushBatch])
 
-  // Aggressive cleanup: if >5 msg/sec, remove top 10 every second
-  useEffect(() => {
-    cleanupIntervalRef.current = setInterval(() => {
-      if (msgCountRef.current > 5) {
-        setLines((prev) => prev.length > 10 ? prev.slice(10) : prev)
-      }
-    }, 1000)
-    return () => { if (cleanupIntervalRef.current) clearInterval(cleanupIntervalRef.current) }
-  }, [])
+  // Preload persisted console history so an open/refreshed console starts with
+  // the recent scrollback instead of a blank feed (deduped against live lines).
+  const loadHistory = useCallback(async () => {
+    try {
+      const d: any = await api.get(`/servers/${server.id}/terminal`)
+      const hist = (d?.lines || []).map((l: any) => ({ kind: 'out' as const, text: String(l.text || ''), ts: Number(l.ts) || Date.now() }))
+      if (!hist.length) return
+      const seen = new Set<string>()
+      const key = (l: { ts: number; text: string }) => `${l.ts}|${l.text}`
+      for (const l of linesRef.current) seen.add(key(l))
+      for (const l of queueRef.current) seen.add(key(l))
+      const fresh = hist.filter((h: any) => !seen.has(`${h.ts}|${h.text}`)) as Line[]
+      if (!fresh.length) return
+      setLines((prev) => {
+        const merged = [...prev]
+        for (const h of fresh) {
+          if (merged.some((m) => m.ts === h.ts && m.text === h.text)) continue
+          merged.push(h)
+        }
+        return merged.length > MAX_LINES ? merged.slice(-MAX_LINES) : merged
+      })
+    } catch { /* history is best-effort */ }
+  }, [server.id])
 
-  // Periodic cleanup: remove top 10 every 10 minutes
   useEffect(() => {
-    const t = setInterval(() => {
-      setLines((prev) => prev.length > 10 ? prev.slice(10) : prev)
-    }, 10 * 60 * 1000)
-    return () => clearInterval(t)
-  }, [])
+    if (flushTimerRef.current) clearTimeout(flushTimerRef.current)
+    flushBatch()
+  }, [paused, flushBatch])
+
+  useEffect(() => {
+    setLines((prev) => (prev.length > MAX_LINES ? prev.slice(-MAX_LINES) : prev))
+    loadHistory()
+  }, [loadHistory])
+
+  useEffect(() => () => { if (flushTimerRef.current) clearTimeout(flushTimerRef.current) }, [])
+
+  useEffect(() => { linesRef.current = lines }, [lines])
 
   // Fetch the server's startup command so the console can render a
   // Pterodactyl-style launch line ("java -Xms... -jar server.jar").
@@ -163,7 +197,7 @@ export function ConsoleTab({ server }: { server: Server }) {
   useEffect(() => {
     const poll = () => api.get(`/servers/${server.id}/stats`).then((d: any) => { if (d?.stats) setLiveStats(d.stats) }).catch(() => {})
     poll()
-    const t = setInterval(poll, 6000)
+    const t = setInterval(poll, 100)
     return () => clearInterval(t)
   }, [server.id])
 
@@ -173,7 +207,7 @@ export function ConsoleTab({ server }: { server: Server }) {
   useEffect(() => {
     if (server.state === 'running' && prevState.current !== 'running') {
       add({ kind: 'sys', text: 'Server marked as running...' })
-      if (startupCmd) add({ kind: 'in', text: `container@${server.node?.name || 'node'}~ ${startupCmd}` })
+      if (startupCmd) add({ kind: 'in', text: `container@${server.role === 'admin' ? (server.node?.name || 'node') : 'instance'}~ ${startupCmd}` })
     }
     if (server.state === 'offline' && prevState.current !== 'offline') {
       add({ kind: 'sys', text: 'Server marked as offline.' })
@@ -185,7 +219,7 @@ export function ConsoleTab({ server }: { server: Server }) {
     if (!paused && pendingRef.current.length) {
       const flush = pendingRef.current
       pendingRef.current = []
-      setLines((prev) => [...prev, ...flush].slice(-500))
+      setLines((prev) => [...prev, ...flush].length > MAX_LINES ? [...prev, ...flush].slice(-MAX_LINES) : [...prev, ...flush])
     }
   }, [paused])
 
@@ -206,11 +240,13 @@ export function ConsoleTab({ server }: { server: Server }) {
     const proto = location.protocol === 'https:' ? 'wss' : 'ws'
     const ws = new WebSocket(`${proto}://${location.host}/ws/server/${server.id}/console?token=${getToken()}`)
     wsRef.current = ws
-    ws.onopen = () => { retryRef.current = 0; setAttached(true); add({ kind: 'sys', text: 'Console attached' }) }
+    ws.onopen = () => { retryRef.current = 0; setAttached(true); setEulaPending(false); add({ kind: 'sys', text: 'Console attached' }) }
     ws.onmessage = (ev) => {
       const raw = String(ev.data)
       let msg: ConsoleMsg | null = null
       try { msg = JSON.parse(raw) as ConsoleMsg } catch { /* raw text */ }
+      if (msg?.type === 'eula-required') { setEulaPending(true); return }
+      if (msg?.type === 'eula-accepted') { setEulaPending(false); return }
       if (msg && msg.line) {
         const clean = msg.line.replace(/\u001b\[[0-9;]*m/g, '')
         const kind = msg.type === 'status' || msg.type === 'system' ? 'sys' : msg.type === 'input' ? 'in' : 'out'
@@ -242,9 +278,27 @@ export function ConsoleTab({ server }: { server: Server }) {
   }
 
   useEffect(() => {
+    // Only follow the feed when auto-scroll is on AND the user is already at
+    // the bottom. If they scrolled up to read earlier lines, stay put and show
+    // the "↓ New logs" jump instead of yanking them back down.
     const b = boxRef.current
-    if (b && autoScroll) b.scrollTop = b.scrollHeight
+    if (b && autoScroll && atBottomRef.current) b.scrollTop = b.scrollHeight
   }, [lines, autoScroll])
+
+  const onTermScroll = () => {
+    const b = boxRef.current
+    if (!b) return
+    const near = b.scrollHeight - b.scrollTop - b.clientHeight < 60
+    atBottomRef.current = near
+    setShowJump(!near)
+  }
+
+  const jumpToBottom = () => {
+    const b = boxRef.current
+    if (b) b.scrollTop = b.scrollHeight
+    atBottomRef.current = true
+    setShowJump(false)
+  }
 
   const sendCommand = (cmd?: string) => {
     const trimmed = (cmd ?? input).trim()
@@ -363,7 +417,7 @@ export function ConsoleTab({ server }: { server: Server }) {
           <button className="btn sm ghost icon" onClick={() => setTermSize(1)} title="Increase font"><Icon name="plus" size={11} /></button>
         </div>
 
-        <div className="terminal" ref={boxRef} style={{ fontSize }}>
+        <div className="terminal" ref={boxRef} style={{ fontSize }} onScroll={onTermScroll}>
           {visibleLines.map((l) => (
             <LineView key={l.id} l={l} />
           ))}
@@ -371,20 +425,23 @@ export function ConsoleTab({ server }: { server: Server }) {
             <div className="term-line term-info"><span className="txt">No lines match filter.</span></div>
           )}
           <div className="term-line term-out"><span className="txt"><span className="term-cursor" /></span></div>
+          {!searchQ.trim() && showJump && (
+            <button className="term-jump" onClick={jumpToBottom}>↓ New logs</button>
+          )}
         </div>
 
-        <div className="term-inputbar">
-          <span className="term-prompt mono sm">$</span>
+        <div className="term-inputbar" style={eulaPending ? { borderColor: 'var(--warning, #e5a50a)', boxShadow: '0 0 0 1px rgba(229,165,10,.35)' } : undefined}>
+          <span className="term-prompt mono sm">{eulaPending ? '!' : '$'}</span>
           <input
             className="input mono flex-1"
-            placeholder={running ? 'Type a command and press Enter (e.g. list, say hello) · ↑/↓ history' : 'Start the server to send commands'}
+            placeholder={eulaPending ? 'Type true to accept the Minecraft EULA and start the server' : (running ? 'Type a command and press Enter (e.g. list, say hello) · ↑/↓ history' : 'Start the server to send commands')}
             value={input}
             onChange={(e) => setInput(e.target.value)}
             onKeyDown={onInputKey}
-            disabled={!running}
+            disabled={!running && !eulaPending}
           />
-          <button className="btn primary sm" onClick={() => sendCommand()} disabled={!running || !input.trim()}>
-            Send
+          <button className="btn primary sm" onClick={() => sendCommand()} disabled={(!running && !eulaPending) || !input.trim()}>
+            {eulaPending ? 'Accept EULA' : 'Send'}
           </button>
         </div>
 
@@ -536,7 +593,7 @@ function LineView({ l }: { l: Line }) {
   const cls = l.kind === 'in' ? 'term-command' : 'term-out'
   return (
     <div className={`term-line ${cls}`}>
-      <span className="txt" dangerouslySetInnerHTML={{ __html: renderMC(l.text).html }} />
+      <span className="txt" dangerouslySetInnerHTML={{ __html: cachedHtml(l.id, l.text) }} />
     </div>
   )
 }

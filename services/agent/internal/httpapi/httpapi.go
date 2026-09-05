@@ -280,6 +280,12 @@ func (s *Server) handleServer(w http.ResponseWriter, r *http.Request, id, sub st
 			writeJSON(w, 500, map[string]any{"error": err.Error()})
 			return
 		}
+		// Re-anchor every connected console's log follow after a start/restart
+		// so the boot output surfaces even though power came over REST (the
+		// panel's normal start path) rather than the console websocket.
+		if action == "start" || action == "restart" {
+			s.hub.OnPower(id)
+		}
 		writeJSON(w, 200, map[string]any{"ok": true, "action": action})
 
 	case sub == "command" && r.Method == http.MethodPost:

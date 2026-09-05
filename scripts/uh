@@ -1,0 +1,172 @@
+#!/usr/bin/env bash
+# UptimeHost operator CLI.
+#
+#   uh start   panel   Start panel (API + nginx) and every local uh-agent, then health-check
+#   uh restart panel   Restart the panel + all sub-agents, then "completed" + full health check
+#   uh stop    panel   Stop panel API + all local uh-agent services (nginx stays up)
+#   uh status          Full health check of panel + sub-agents
+#   uh check           (alias for status)
+#
+# Units it manages on the panel host: upTIMEhost-api.service, nginx.service,
+# and every systemd unit matching uh-agent*.service ("sub-agents").
+
+set -uo pipefail
+
+PANEL_UNIT="uptimehost-api.service"
+WEB_UNIT="nginx.service"
+
+cyan()  { printf '\033[1;36m%s\033[0m\n' "$*"; }
+green() { printf '\033[1;32m%s\033[0m\n' "$*"; }
+yellow(){ printf '\033[1;33m%s\033[0m\n' "$*"; }
+red()   { printf '\033[1;31m%s\033[0m\n' "$*"; }
+
+if [[ "$(id -u)" -ne 0 ]]; then SUDO="sudo"; else SUDO=""; fi
+
+panel_url() {
+  local line
+  if [[ -n "${UH_PANEL_URL:-}" ]]; then printf '%s' "$UH_PANEL_URL"; return; fi
+  line="$($SUDO systemctl show "$PANEL_UNIT" -p Environment 2>/dev/null | tr ' ' '\n' | grep -m1 '^UH_PANEL_URL=' || true)"
+  if [[ -n "$line" ]]; then printf '%s' "${line#UH_PANEL_URL=}"; return; fi
+  printf 'https://panel.uptimehost.in'
+}
+
+agent_units() {
+  $SUDO systemctl list-unit-files --type=service 'uh-agent*.service' --no-legend 2>/dev/null | awk '{print $1}'
+}
+
+managed_units() {
+  printf '%s\n' "$PANEL_UNIT"
+  agent_units | grep -vE "^$PANEL_UNIT$" || true
+}
+
+system_action() {
+  local action="$1" unit="$2"
+  if [[ "$action" == "start" ]]; then
+    $SUDO systemctl daemon-reload
+    $SUDO systemctl enable --now "$unit" 2>/dev/null || $SUDO systemctl start "$unit"
+  else
+    $SUDO systemctl restart "$unit"
+  fi
+}
+
+run_panel() {
+  local action="$1"
+  cyan "[uh] ${action^}ing panel ($PANEL_UNIT)..."
+  system_action "$action" "$PANEL_UNIT"
+  green "[uh] panel API ${action}ed"
+
+  wait_api_ready "$(panel_url)"
+
+  local agents=()
+  while IFS= read -r u; do [[ -n "$u" ]] && agents+=("$u"); done < <(agent_units)
+  if [[ "${#agents[@]}" -gt 0 ]]; then
+    cyan "[uh] ${action^}ing sub-agents: ${agents[*]}..."
+    for u in "${agents[@]}"; do
+      system_action "$action" "$u"
+      green "[uh]   $u ${action}ed"
+    done
+    wait_agent_ready
+  else
+    yellow "[uh] no uh-agent systemd units found on this host — skipping sub-agents"
+  fi
+
+  if [[ "$action" == "restart" ]] && $SUDO systemctl list-unit-files "$WEB_UNIT" >/dev/null 2>&1; then
+    cyan "[uh] reloading web ($WEB_UNIT)..."
+    $SUDO nginx -t >/dev/null 2>&1 && $SUDO systemctl reload "$WEB_UNIT" && green "[uh] $WEB_UNIT reloaded" || yellow "[uh] $WEB_UNIT reload skipped (not present)"
+  fi
+}
+
+wait_api_ready() {
+  local base="$1" i
+  for i in $(seq 1 40); do
+    if curl -k -s --max-time 3 "$base/api/health" 2>/dev/null | grep -q '"ok":true'; then return 0; fi
+    sleep 1
+  done
+  yellow "[uh] warning: panel API did not report healthy within 40s"
+  return 1
+}
+
+wait_agent_ready() {
+  if ! [[ -r /etc/uptimehost/agent.env ]]; then return 0; fi
+  local host addr port i
+  host="$(grep -m1 '^UH_AGENT_HOST=' /etc/uptimehost/agent.env | cut -d= -f2-)"
+  addr="$(grep -m1 '^UH_AGENT_ADDR=' /etc/uptimehost/agent.env | cut -d= -f2-)"
+  port="${addr##*:}"
+  for i in $(seq 1 15); do
+    if nc -z -w2 "${host:-127.0.0.1}" "${port:-7373}" 2>/dev/null; then return 0; fi
+    sleep 1
+  done
+  yellow "[uh] warning: agent listener on ${host:-127.0.0.1}:${port:-7373} not up within 15s"
+  return 1
+}
+
+run_status() {
+  local base="$(panel_url)" fail=0
+  local units=()
+  while IFS= read -r u; do [[ -n "$u" ]] && units+=("$u"); done < <(managed_units)
+  cyan "[uh] full health check — $base"
+  echo "  --- systemd units ---"
+  for u in "${units[@]}"; do
+    local st
+    st="$($SUDO systemctl is-active "$u" 2>/dev/null || true)"
+    if [[ "$st" == "active" ]]; then echo "  $(green "ok")    $u ($st)"
+    else echo "  $(red "FAIL")  $u ($st)"; fail=1; fi
+  done
+
+  echo "  --- endpoint checks ---"
+  local code api_ok
+  code="$(curl -k -s -o /dev/null -w '%{http_code}' --max-time 8 "$base/" || echo 000)"
+  if [[ "$code" == "200" ]]; then echo "  $(green "ok")    web   $base/ -> $code"
+  else echo "  $(red "FAIL")  web   $base/ -> $code"; fail=1; fi
+  api_ok="$(curl -k -s --max-time 8 "$base/api/health" || true)"
+  if printf '%s' "$api_ok" | grep -q '"ok":true'; then echo "  $(green "ok")    api   $base/api/health"
+  else echo "  $(red "FAIL")  api   $base/api/health -> $api_ok"; fail=1; fi
+
+  echo "  --- agent listeners ---"
+  if [[ -r /etc/uptimehost/agent.env ]]; then
+    local host="$(grep -m1 '^UH_AGENT_HOST=' /etc/uptimehost/agent.env | cut -d= -f2-)" addr
+    addr="$(grep -m1 '^UH_AGENT_ADDR=' /etc/uptimehost/agent.env | cut -d= -f2-)"
+    local port="${addr##*:}"
+    if nc -z -w3 "${host:-127.0.0.1}" "${port:-7373}" 2>/dev/null; then
+      echo "  $(green "ok")    agent ${host:-127.0.0.1}:${port:-7373} (listening)"
+    else
+      echo "  $(red "FAIL")  agent ${host:-127.0.0.1}:${port:-7373} (not reachable)"; fail=1
+    fi
+  elif [[ "${#units[@]}" -gt 0 ]]; then
+    echo "  $(yellow "info")  no /etc/uptimehost/agent.env for a TCP probe"
+  fi
+
+  if [[ "$fail" -eq 0 ]]; then
+    green "[uh] check PASSED — everything healthy"
+    return 0
+  fi
+  red "[uh] check FAILED"
+  return 1
+}
+
+usage() { sed -n '2,9p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 1; }
+
+cmd="${1:-}"; verb="${2:-}"
+case "$cmd" in
+  start)   [[ "$verb" == "panel" ]] || usage; run_panel start ;;
+  restart) [[ "$verb" == "panel" ]] || usage; run_panel restart ;;
+  stop)    [[ "$verb" == "panel" ]] || usage
+           cyan "[uh] stopping panel ($PANEL_UNIT)..."
+           $SUDO systemctl stop "$PANEL_UNIT"
+           while IFS= read -r u; do [[ -n "$u" ]] && { cyan "[uh] stopping $u..."; $SUDO systemctl stop "$u"; }; done < <(agent_units)
+           green "[uh] stopped" ;;
+  status|check) run_status; exit $? ;;
+  -h|--help|help|"") usage ;;
+  *) usage ;;
+esac
+
+case "$cmd" in
+  start|restart)
+    echo
+    green "[uh] completed"
+    echo
+    run_status
+    exit $?
+    ;;
+esac
+exit 0

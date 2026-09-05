@@ -5,6 +5,19 @@ import type { Server } from '@uptimehost/types'
 
 interface FEntry { name: string; path: string; isDir: boolean; size?: number }
 
+const FM_THEMES = [
+  { id: 'gold', name: 'Gold', accent: '#fdc92f' },
+  { id: 'midnight', name: 'Midnight', accent: '#58a6ff' },
+  { id: 'amethyst', name: 'Amethyst', accent: '#a78bfa' },
+  { id: 'emerald', name: 'Emerald', accent: '#34d399' },
+  { id: 'ocean', name: 'Ocean', accent: '#22d3ee' },
+  { id: 'crimson', name: 'Crimson', accent: '#f87171' },
+  { id: 'rose', name: 'Rose', accent: '#f472b6' },
+  { id: 'slate', name: 'Slate', accent: '#94a3b8' },
+  { id: 'mint', name: 'Mint', accent: '#86efac' },
+  { id: 'neon', name: 'Neon', accent: '#e879f9' },
+]
+
 export function FilesTab({ server }: { server: Server }) {
   const [cwd, setCwd] = useState('/')
   const [files, setFiles] = useState<FEntry[] | null>(null)
@@ -17,7 +30,25 @@ export function FilesTab({ server }: { server: Server }) {
   const [selected, setSelected] = useState<Set<string>>(new Set())
   const [renameTarget, setRenameTarget] = useState<FEntry | null>(null)
   const [deleteTargets, setDeleteTargets] = useState<string[] | null>(null)
+  const [fmTheme, setFmTheme] = useState(() => localStorage.getItem('uh_fm_theme') || '')
+  const [themeOpen, setThemeOpen] = useState(false)
   const uploadRef = useRef<HTMLInputElement>(null)
+
+  useEffect(() => {
+    if (!themeOpen) return
+    const onDoc = () => setThemeOpen(false)
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setThemeOpen(false) }
+    document.addEventListener('click', onDoc)
+    document.addEventListener('keydown', onKey)
+    return () => { document.removeEventListener('click', onDoc); document.removeEventListener('keydown', onKey) }
+  }, [themeOpen])
+
+  const pickFmTheme = (id: string) => {
+    setFmTheme(id)
+    if (id) localStorage.setItem('uh_fm_theme', id)
+    else localStorage.removeItem('uh_fm_theme')
+    setThemeOpen(false)
+  }
 
   const load = useCallback(async (path: string) => {
     setLoading(true); setErr('')
@@ -136,9 +167,15 @@ export function FilesTab({ server }: { server: Server }) {
 
   const crumbs = cwd.split('/').filter(Boolean)
   const selCount = selected.size
+  const allSelected = (files?.length ?? 0) > 0 && files!.every((f) => selected.has(f.path))
+
+  const toggleAll = () => {
+    if (allSelected) setSelected(new Set())
+    else setSelected(new Set((files ?? []).map((f) => f.path)))
+  }
 
   return (
-    <div className="card fm">
+    <div className={`card fm${fmTheme ? ` fm-t-${fmTheme}` : ''}`}>
       <div className="card-h fm-toolbar" style={{ gap: 6 }}>
         <button className="btn ghost icon sm" onClick={() => setCwd('/')} title="Root"><Icon name="folder" size={14} /></button>
         <button className="btn ghost icon sm" onClick={() => setCwd(parentOf(cwd))} disabled={cwd === '/'} title="Up"><Icon name="chevron" size={14} /></button>
@@ -157,7 +194,35 @@ export function FilesTab({ server }: { server: Server }) {
         />
         <button className="btn sm ghost" disabled={busy} onClick={() => uploadRef.current?.click()}><Icon name="upload" size={13} /> Upload</button>
         <button className="btn sm ghost" onClick={() => { setCreating((v) => !v); setNewName('') }}><Icon name="folder" size={13} /> New</button>
-        <button className="btn sm" disabled={busy} onClick={() => load(cwd)}><Icon name="restart" size={13} /> Refresh</button>
+        <button className="btn sm ghost" disabled={busy} onClick={() => load(cwd)}><Icon name="restart" size={13} /> Refresh</button>
+        <button
+          className={`btn sm ${selCount > 0 ? '' : 'ghost'}`}
+          title={selCount > 0 ? `${selCount} selected — click to clear or use Delete below` : 'Mass select files'}
+          onClick={() => selCount > 0 ? setSelected(new Set()) : toggleAll()}
+        >
+          <Icon name="check" size={13} /> {allSelected ? 'Deselect all' : selCount > 0 ? `${selCount} selected` : 'Select all'}
+        </button>
+        <div style={{ position: 'relative' }} onClick={(e) => e.stopPropagation()}>
+          <button className={`btn sm ghost${fmTheme ? '' : ''}`} title="File manager theme" onClick={() => setThemeOpen((v) => !v)}>
+            <Icon name="palette" size={13} /> {fmTheme ? FM_THEMES.find((t) => t.id === fmTheme)?.name ?? 'Theme' : 'Theme'}
+          </button>
+          {themeOpen && (
+            <div className="fm-theme-menu" role="menu">
+              {FM_THEMES.map((t) => (
+                <button key={t.id} className={`fm-theme-item${fmTheme === t.id ? ' active' : ''}`} onClick={() => pickFmTheme(t.id)}>
+                  <span className="fm-theme-dot" style={{ background: t.accent }} />
+                  <span>{t.name}</span>
+                  {fmTheme === t.id && <Icon name="check" size={13} />}
+                </button>
+              ))}
+              <button className="fm-theme-item" onClick={() => pickFmTheme('')}>
+                <span className="fm-theme-dot" style={{ background: 'repeating-conic-gradient(#8a8f98 0% 25%, #3a3f4a 0% 50%) 50% / 10px 10px' }} />
+                <span>Default</span>
+                {!fmTheme && <Icon name="check" size={13} />}
+              </button>
+            </div>
+          )}
+        </div>
       </div>
 
       {creating && (
