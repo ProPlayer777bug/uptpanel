@@ -5,7 +5,7 @@ import { useApp } from '../state/auth'
 import { Icon, StatePill, Button, EmptyState, Switch, Menu, Spinner, toast, Tooltip } from '../components/ui'
 import { CreateServer } from './CreateServer'
 import { Shell } from '../components/Shell'
-import { maskAddress } from '../utils/mask'
+import { publicAddress } from '../utils/mask'
 
 function barPct(v: number) { return Math.min(100, Math.max(0, v)) }
 
@@ -220,7 +220,10 @@ function ServerCard({ server, selected, onSelect, onOpen }: { server: any; selec
 }
 
 function copyAddr(s: any) {
-  const addr = s.allocations?.[0] ? `${s.node?.name || ''}:${s.allocations[0].port}` : ''
+  // Copy the real connectable address: alias if set, else node host/IP + port.
+  const addr = s.allocations?.[0]
+    ? publicAddress(s.allocations[0], s.node) || `${s.node?.host || s.node?.name || ''}:${s.allocations[0].port}`
+    : ''
   if (!addr) { toast.info('No allocation'); return }
   navigator.clipboard?.writeText(addr).then(() => toast.ok('Copied address')).catch(() => toast.err('Copy failed'))
 }

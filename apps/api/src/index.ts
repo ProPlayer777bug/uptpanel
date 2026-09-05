@@ -1655,7 +1655,7 @@ function withRelations(s: any, user?: any) {
   const node = store.db.nodes.find((n) => n.id === s.nodeId)
   const bp = store.db.blueprints.find((b) => b.id === s.blueprintId)
   const acc = user ? serverAccess(user, s, store) : { ok: false, permissions: {} }
-  return { ...s, node: node ? { id: node.id, name: node.name, status: node.status, agentUrl: node.agentUrl } : null, blueprint: bp, permissions: acc.permissions, role: yourRole(user, s) }
+  return { ...s, node: node ? { id: node.id, name: node.name, host: node.host, status: node.status, agentUrl: node.agentUrl } : null, blueprint: bp, permissions: acc.permissions, role: yourRole(user, s) }
 }
 
 // Non-admin users only see servers they have been granted access to (or own).

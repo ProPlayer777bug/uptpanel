@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react'
+import { publicHost } from '../../utils/mask'
 import { api } from '../../api/client'
 import { useApp } from '../../state/auth'
 import { Icon, Spinner, toast } from '../../components/ui'
@@ -62,7 +63,7 @@ export function NetworkTab({ server }: { server: Server }) {
               <tbody>
                 {allocs.map((a: any) => (
                   <tr key={a.id}>
-                    <td className="mono sm">{a.alias || a.ip || '0.0.0.0'}</td>
+                    <td className="mono sm">{publicHost(a, server.node) || a.alias || a.ip || '0.0.0.0'}</td>
                     <td className="mono sm">{a.port} {(server as any)?.primaryAllocationId === a.id ? <span className="badge cyan xs ml-1">primary</span> : null}</td>
                     <td><span className="badge gray xs">{a.proto || 'tcp'}</span></td>
                     <td style={{ textAlign: 'right' }}>
@@ -106,7 +107,7 @@ export function NetworkTab({ server }: { server: Server }) {
             <div className="flex gap-1 flex-wrap">
               {freePool.slice(0, 12).map((p) => (
                 <button key={p.id} className="btn sm" disabled={busy} onClick={() => add(p.port)}>
-                  <span className="mono">{p.alias || p.ip ? `${(p.alias || p.ip)}:` : ''}{p.port}</span>
+                  <span className="mono">{publicHost(p, server.node) ? `${publicHost(p, server.node)}:${p.port}` : `:${p.port}`}</span>
                 </button>
               ))}
               {freePool.length > 12 && <span className="xs text-3">+{freePool.length - 12} more</span>}

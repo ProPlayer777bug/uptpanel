@@ -47,3 +47,24 @@ export function maskHost(host: string | undefined | null): string {
   // Likely a hostname - leave as is or mask partially
   return host
 }
+
+// The real hostname clients connect to for an allocation: the optional public
+// alias (hostname) wins, then the node's public host/IP, then the allocation's
+// bind IP — skipping unusable values like ''/0.0.0.0. This is the actual
+// connect address (players paste it straight into their server list), so it is
+// intentionally NOT masked.
+export function publicHost(alloc: { alias?: string; ip?: string } | undefined | null, node?: { host?: string } | null): string {
+  const alias = alloc?.alias?.trim()
+  if (alias && alias !== '0.0.0.0') return alias
+  const nodeHost = node?.host?.trim()
+  if (nodeHost && nodeHost !== '0.0.0.0') return nodeHost
+  const allocIp = alloc?.ip?.trim()
+  if (allocIp && allocIp !== '0.0.0.0') return allocIp
+  return ''
+}
+
+export function publicAddress(alloc: { alias?: string; ip?: string; port?: number } | undefined | null, node?: { host?: string } | null): string {
+  const host = publicHost(alloc, node)
+  if (host && alloc?.port) return `${host}:${alloc.port}`
+  return ''
+}

@@ -4,7 +4,7 @@ import { api } from '../../api/client'
 import { getToken } from '../../api/client'
 import { powerAction } from '../../api/hooks'
 import { useApp } from '../../state/auth'
-import { maskAddress } from '../../utils/mask'
+import { publicAddress } from '../../utils/mask'
 import type { Server } from '@uptimehost/types'
 
 interface Line { id: number; kind: 'out' | 'in' | 'sys'; text: string; ts: number }
@@ -333,9 +333,9 @@ export function ConsoleTab({ server }: { server: Server }) {
   }
 
   const running = server.state === 'running' || server.state === 'started' || server.state === 'restarting'
-  const host = server.node?.name || '—'
+  const host = server.node?.host || server.node?.name || '—'
   const a0 = server.allocations?.[0]
-  const address = a0 ? maskAddress(`${a0.alias || a0.ip || host}:${a0.port}`) : host
+  const address = a0 ? publicAddress(a0, server.node) || `${a0.alias || a0.ip || host}:${a0.port}` : host
 
   return (
     <div className="console-grid">

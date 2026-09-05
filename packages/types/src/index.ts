@@ -194,7 +194,7 @@ export interface Server {
   javaVersion?: number
   /** Extra environment derived from the server's pinned runtime. */
   javaEnv?: Record<string, string>
-  node?: { id: string; name: string; status: string; agentUrl: string } | null
+  node?: { id: string; name: string; host?: string; status: string; agentUrl: string } | null
   blueprint?: Blueprint | null
 }
 
