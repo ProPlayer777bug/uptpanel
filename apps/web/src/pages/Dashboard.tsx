@@ -43,6 +43,9 @@ export function Dashboard() {
         </div>
         <div style={{ flex: 1 }} />
         {canAdmin && (
+          <Button variant="secondary" icon="user" onClick={() => setShowUserMode(!showUserMode)}>User mode</Button>
+        )}
+        {canAdmin && (
           <Button variant="primary" icon="plus" onClick={() => navigate('/servers/new')}>Create Server</Button>
         )}
         {canAdmin && (
