@@ -140,7 +140,7 @@ export function BackupsTab({ server }: { server: Server }) {
       <div className="card-h">
         <Icon name="download" size={15} /> Backups <span className="h-sub">real ZIP archives on the node</span>
         <div style={{ flex: 1 }} />
-        <input className="inp xs" style={{ width: 180 }} placeholder="Backup name (optional)" value={name} onChange={(e) => setName(e.target.value)} />
+        <input className="inp xs flex-1" style={{ width: 180, minWidth: 130, maxWidth: 220, flexShrink: 0 }} placeholder="Backup name (optional)" value={name} onChange={(e) => setName(e.target.value)} />
         <button className="btn sm primary" onClick={create} disabled={busy}><Icon name="plus" size={13} /> New backup</button>
       </div>
       <div style={{ maxHeight: '60vh', overflowY: 'auto' }}>

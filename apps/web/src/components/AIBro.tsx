@@ -188,7 +188,7 @@ export function AIBro() {
                 )
               })}
             </div>
-            <div className="flex mt-2" style={{ gap: 8, alignItems: 'center' }}>
+            <div className="btn-row mt-2" style={{ gap: 8 }}>
               <button className="btn sm primary" onClick={saveServers}>Save server scope</button>
               <button className="btn sm ghost" onClick={() => setSelectedServers(servers.map((s) => s.id))}>Select all</button>
               <button className="btn sm ghost" onClick={() => setSelectedServers([])}>All servers</button>
