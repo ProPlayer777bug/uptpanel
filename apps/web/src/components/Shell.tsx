@@ -68,6 +68,21 @@ export function Shell({ children, subnav }: { children: React.ReactNode; subnav?
   const [palette, setPalette] = useState(false)
   const [collapsed, setCollapsed] = useState(() => localStorage.getItem('uh_side_collapsed') === '1')
   const [drawer, setDrawer] = useState(false)
+  const [isFs, setIsFs] = useState(false)
+  const fsEnabled = typeof document !== 'undefined' && document.fullscreenEnabled
+
+  useEffect(() => {
+    const onFs = () => setIsFs(!!document.fullscreenElement)
+    document.addEventListener('fullscreenchange', onFs)
+    return () => document.removeEventListener('fullscreenchange', onFs)
+  }, [])
+
+  const toggleFullscreen = () => {
+    try {
+      if (document.fullscreenElement) void document.exitFullscreen()
+      else void document.documentElement.requestFullscreen()
+    } catch { /* fullscreen unavailable */ }
+  }
 
   const toggleCollapse = () => {
     const v = !collapsed
@@ -182,6 +197,13 @@ export function Shell({ children, subnav }: { children: React.ReactNode; subnav?
           } items={[
             { label: 'No new notifications', icon: 'bell', onClick: () => {} },
           ]} />
+          {fsEnabled && (
+            <Tooltip tip={isFs ? 'Exit fullscreen' : 'Fullscreen'} side="left">
+              <button className="nav-icon-btn" onClick={toggleFullscreen} title="Fullscreen">
+                <Icon name={isFs ? 'minimize' : 'expand'} size={16} />
+              </button>
+            </Tooltip>
+          )}
           <Menu align="right" trigger={
             <span className="avatar" style={{ width: 30, height: 30, fontSize: 12, cursor: 'pointer', background: `hsl(${user?.avatarHue || 0} 65% 45%)` }}>
               {user?.name?.[0] || '?'}

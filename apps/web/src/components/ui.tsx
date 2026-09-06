@@ -98,6 +98,7 @@ const I = {
   help: <><circle cx="12" cy="12" r="9" /><path d="M9.5 9a2.5 2.5 0 1 1 3.8 2.2c-.8.5-1.3 1-1.3 1.8v.5M12 17h.01" /></>,
   collapse: <><path d="m8 11 4-4 4 4M8 17l4-4 4 4" /></>,
   expand: <><rect x="3" y="3" width="18" height="18" rx="2" /><path d="M3 9h6V3M21 15h-6v6" /></>,
+  minimize: <><rect x="3" y="3" width="18" height="18" rx="2" /><path d="M15 3v6h6M9 21v-6H3" /></>,
   dots: <><circle cx="5" cy="12" r="1.4" /><circle cx="12" cy="12" r="1.4" /><circle cx="19" cy="12" r="1.4" /></>,
   star: <path d="M12 3 5 12h5l-1 9 3-7 7-7h-5l3-4Z" />,
   upload: <><path d="M12 16V4m0 0 4 4m-4-4-4 4" /><path d="M4 16v3a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-3" /></>,
