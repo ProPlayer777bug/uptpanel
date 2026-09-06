@@ -1850,7 +1850,7 @@ app.post('/api/servers', async (req, reply) => {
   const user = me(req)
   if (!user) return reply.code(401).send({ ok: false, error: 'UNAUTHENTICATED' })
   if (!can(user, 'modify')) return reply.code(403).send({ ok: false, error: 'FORBIDDEN' })
-  const { name, blueprintId, nodeId, memoryMb, cpuPercent, storageGb, extraEnv, maxBackups, maxAllocations } = (req.body || {}) as any
+  const { name, blueprintId, nodeId, memoryMb, cpuPercent, storageGb, extraEnv, maxBackups, maxAllocations, suspendAfterDays } = (req.body || {}) as any
   const node = store.db.nodes.find((n) => n.id === nodeId)
   const bp = store.db.blueprints.find((b) => b.id === blueprintId)
   if (!node) return reply.code(400).send({ ok: false, error: 'NODE_REQUIRED' })
@@ -1901,6 +1901,14 @@ app.post('/api/servers', async (req, reply) => {
     // 1 port (most servers need exactly one connect address).
     maxBackups: validLim(toInt(maxBackups), 1, 100) || (node.serverLimits?.maxBackups ?? 1),
     maxAllocations: validLim(toInt(maxAllocations), 1, 100) ?? 1,
+    // Auto-suspend policy: the server must be manually resumed (or the term
+    // extended) before its due date, otherwise it is suspended automatically.
+    // Default is 1 month (30 days); 0 disables auto-suspension entirely.
+    suspendAfterDays: validLim(toInt(suspendAfterDays), 0, 365) ?? 30,
+    autoSuspendAt: (() => {
+      const d = validLim(toInt(suspendAfterDays), 0, 365) ?? 30
+      return d > 0 ? Date.now() + d * 86400000 : null
+    })(),
     // Allocate from the node's manual pool (Allocations tab) when it has
     // enough free ports; otherwise fall back to the node's raw port range or
     // blueprint fixed ports. The pool never auto-expands. Never hands out more
@@ -2072,6 +2080,73 @@ app.post('/api/servers/:id/power', async (req, reply) => {
     pushTerminal(id, `[control] ERROR: ${server.error}`)
     return reply.code(500).send({ ok: false, error: 'POWER_FAILED', message: String(e?.message || e) })
   }
+})
+
+// ---------------------------------------------------------------------------
+// Suspension (§33) — manual suspend/resume + the auto-suspend term.
+// A suspended server's container is killed and it cannot be started again
+// until an admin resumes it. Auto-suspend (server.suspendAfterDays) fires from
+// the cron ticker below when autoSuspendAt lapses.
+// ---------------------------------------------------------------------------
+app.post('/api/servers/:id/suspend', async (req, reply) => {
+  const user = me(req)
+  if (!user) return reply.code(401).send({ ok: false, error: 'UNAUTHENTICATED' })
+  if (!can(user, 'admin')) return reply.code(403).send({ ok: false, error: 'FORBIDDEN' })
+  const { id } = req.params as any
+  const { action } = (req.body || {}) as any
+  const server = store.db.servers.find((s) => s.id === id)
+  if (!server) return reply.code(404).send({ ok: false, error: 'SERVER_NOT_FOUND' })
+  const node = store.db.nodes.find((n) => n.id === server.nodeId)
+  const client = node ? agentFor(node) : null
+
+  if (action === 'suspend') {
+    if (server.state === 'suspended') return reply.code(409).send({ ok: false, error: 'ALREADY_SUSPENDED' })
+    // Best-effort hard stop so nothing keeps running on the node while locked.
+    if (client && ['running', 'starting', 'restarting', 'stopping', 'killing', 'provisioning'].includes(server.state)) {
+      try { await client.power(server.id, 'kill') } catch { /* best-effort */ }
+    }
+    server.state = 'suspended'
+    server.suspendedAt = Date.now()
+    server.startedAt = null
+    store.persist()
+    broadcastServer(`srv:${id}`, server, user)
+    pushTerminal(id, '[control] server suspended by operator', 'warn')
+    audit(store, user.name, 'SUSPEND', server.name)
+    activity(user, 'server', 'warn', `${server.name} suspended`, { serverId: id })
+    return { ok: true, server: withRelations(server) }
+  }
+
+  if (action === 'resume') {
+    if (server.state !== 'suspended') return reply.code(409).send({ ok: false, error: 'NOT_SUSPENDED' })
+    // Re-arm the auto-suspend cycle: a resumed server gets a fresh term.
+    server.autoSuspendAt = server.suspendAfterDays > 0 ? Date.now() + server.suspendAfterDays * 86400000 : null
+    server.suspendedAt = null
+    if (client) {
+      server.state = 'starting'
+      store.persist()
+      broadcastServer(`srv:${id}`, server, user)
+      pushTerminal(id, '[control] resuming server ...', 'info')
+      try {
+        await client.power(server.id, 'start')
+        server.state = 'running'
+        server.startedAt = Date.now()
+      } catch {
+        // Node out of reach or container missing? Drop to offline so the owner
+        // (or the start control) can bring it back up cleanly.
+        server.state = 'offline'
+      }
+    } else {
+      server.state = 'offline'
+    }
+    store.persist()
+    broadcastServer(`srv:${id}`, server, user)
+    pushTerminal(id, '[control] server resumed', 'info')
+    audit(store, user.name, 'RESUME', server.name)
+    activity(user, 'server', 'info', `${server.name} resumed (auto-suspend re-armed)`, { serverId: id })
+    return { ok: true, server: withRelations(server) }
+  }
+
+  return reply.code(400).send({ ok: false, error: 'INVALID_ACTION', supported: ['suspend', 'resume'] })
 })
 
 app.delete('/api/servers/:id', async (req, reply) => {
@@ -2385,7 +2460,7 @@ async function reconcileServers(node: any) {
       if (running) desired = 'running'
       else if (dockerState === 'created') desired = server.installed ? 'offline' : 'provisioning'
       else desired = 'offline'
-      if (server.state !== desired && !server.state.startsWith('start') && !server.state.startsWith('stop') && !server.state.startsWith('restart')) {
+      if (server.state !== desired && server.state !== 'suspended' && !server.state.startsWith('start') && !server.state.startsWith('stop') && !server.state.startsWith('restart')) {
         console.log(`[reconcile] ${server.id} ${server.state} -> ${desired} (docker=${dockerState} running=${running})`)
         server.state = desired
         if (!running) server.startedAt = null
@@ -2995,6 +3070,16 @@ app.put('/api/servers/:id', async (req, reply) => {
   if (updInt('storageGb', 1, 65536, 'storageGb')) changed.push('storageGb')
   if (updInt('maxBackups', 1, 100, 'maxBackups')) changed.push('maxBackups')
   if (updInt('maxAllocations', 1, 100, 'maxAllocations')) changed.push('maxAllocations')
+  // Auto-suspend term: 0 disables, otherwise it restarts the countdown from now
+  // (so extending the term grants a fresh window).
+  if (b.suspendAfterDays !== undefined) {
+    const v = validLim(toInt(b.suspendAfterDays), 0, 365)
+    if (v !== undefined) {
+      server.suspendAfterDays = v
+      server.autoSuspendAt = v > 0 ? Date.now() + v * 86400000 : null
+      changed.push('auto-suspend')
+    }
+  }
 
   // Cap allocations at the (possibly reduced) quota when it shrinks.
   if (changed.includes('maxAllocations') || changed.includes('maxBackups')) {
@@ -3475,6 +3560,27 @@ setInterval(() => {
     }
     performBackup(server, null, { isAuto: true, name: `Auto backup · ${new Date().toLocaleString()}` }).catch(() => {})
   }
+
+  // Auto-suspend: suspend any server whose policy term has lapsed (default 30
+  // days). The due time only advances again after an admin resumes it (the
+  // resume handler re-arms a fresh term).
+  const nowS = Date.now()
+  let suspendedAny = false
+  for (const s of store.db.servers) {
+    if (s.suspendAfterDays <= 0 || !s.autoSuspendAt || nowS < s.autoSuspendAt || s.state === 'suspended') continue
+    const snode = store.db.nodes.find((n) => n.id === s.nodeId)
+    const sclient = snode ? agentFor(snode) : null
+    if (sclient) sclient.power(s.id, 'kill').catch(() => {})
+    s.state = 'suspended'
+    s.suspendedAt = nowS
+    s.startedAt = null
+    suspendedAny = true
+    pushTerminal(s.id, `[auto-suspend] policy term ended (${s.suspendAfterDays}d) — server suspended`, 'warn')
+    broadcastServer(`srv:${s.id}`, s, null)
+    audit(store, 'system', 'AUTO_SUSPEND', s.name)
+    activity(null, 'server', 'warn', `auto-suspended: ${s.name} (${s.suspendAfterDays}d term ended)`, { serverId: s.id })
+  }
+  if (suspendedAny) store.persist()
 }, 10000)
 
 // ---------------------------------------------------------------------------

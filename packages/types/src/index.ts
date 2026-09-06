@@ -11,6 +11,7 @@ export type ServerState =
   | 'killing'
   | 'offline'
   | 'error'
+  | 'suspended'
 
 export interface Session {
   token: string
@@ -205,6 +206,12 @@ export interface Server {
   maxBackups?: number
   /** Per-server allocation (port) quota, defaults to 1. */
   maxAllocations?: number
+  /** Auto-suspend policy term in days; 0 = disabled, default 30. */
+  suspendAfterDays?: number
+  /** When the auto-suspend term lapses (ms epoch); null when disabled. */
+  autoSuspendAt?: number | null
+  /** When the server was last suspended (ms epoch). */
+  suspendedAt?: number | null
   node?: { id: string; name: string; host?: string; status: string; agentUrl: string } | null
   blueprint?: Blueprint | null
 }

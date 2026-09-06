@@ -2,7 +2,7 @@ import { useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { api } from '../../api/client'
 import { useApp } from '../../state/auth'
-import { Icon, Modal, toast } from '../../components/ui'
+import { Icon, Modal, StatePill, toast } from '../../components/ui'
 import type { Server } from '@uptimehost/types'
 
 export function SettingsTab({ server }: { server: Server }) {
@@ -12,6 +12,17 @@ export function SettingsTab({ server }: { server: Server }) {
   const [deleting, setDeleting] = useState(false)
   const [reinstalling, setReinstalling] = useState(false)
   const [typedName, setTypedName] = useState('')
+  const [suspendBusy, setSuspendBusy] = useState(false)
+
+  const suspendAction = async (action: 'suspend' | 'resume') => {
+    setSuspendBusy(true)
+    try {
+      await api.post(`/servers/${server.id}/suspend`, { action })
+      toast.ok(action === 'suspend' ? 'Server suspended' : 'Server resumed')
+      refresh()
+    } catch (e: any) { toast.err(e?.message) }
+    finally { setSuspendBusy(false) }
+  }
 
   const reinstall = async () => {
     if (!window.confirm(`Reinstall ${server.name}? This wipes its files and rebuilds from the image.`)) return
@@ -49,6 +60,25 @@ export function SettingsTab({ server }: { server: Server }) {
               <div className="code-block">{Object.entries(env).map(([k, v]) => `${k}=${v}`).join('\n')}</div>
             </div>
           )}
+        </div>
+      </div>
+
+      <div className="card" style={{ borderColor: 'rgba(255,165,60,0.35)' }}>
+        <div className="card-h"><Icon name="lock" size={15} /> Suspension</div>
+        <div className="card-b">
+          <div className="flex gap-3" style={{ alignItems: 'center', flexWrap: 'wrap' }}>
+            <StatePill state={server.state} />
+            <span className="sm text-2">
+              {server.state === 'suspended'
+                ? <span>A suspended server stays locked until an admin resumes it. Resuming re-arms the auto-suspend term.</span>
+                : (server.suspendAfterDays > 0
+                  ? <span>Auto-suspend term: <b>{server.suspendAfterDays}d</b>{server.autoSuspendAt ? <> · due <b>{new Date(server.autoSuspendAt).toLocaleString()}</b></> : null}</span>
+                  : <span>Auto-suspend is disabled for this server.</span>)}
+            </span>
+            <div style={{ flex: 1 }} />
+            <button className="btn" onClick={() => suspendAction('suspend')} disabled={suspendBusy || server.state === 'suspended'}><Icon name="stop" size={14} /> Suspend now</button>
+            <button className="btn primary" onClick={() => suspendAction('resume')} disabled={suspendBusy || server.state !== 'suspended'}><Icon name="play" size={14} /> Resume</button>
+          </div>
         </div>
       </div>
 

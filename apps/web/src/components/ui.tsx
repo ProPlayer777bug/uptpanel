@@ -25,6 +25,7 @@ const STATE_MAP: Record<string, { label: string; cls: string }> = {
   killing: { label: 'Killing', cls: 'red' },
   provisioning: { label: 'Provisioning', cls: 'blue' },
   error: { label: 'Error', cls: 'red' },
+  suspended: { label: 'Suspended', cls: 'red' },
 }
 export function StatePill({ state, pulse }: { state: string; pulse?: boolean }) {
   const m = STATE_MAP[state] || { label: state, cls: 'gray' }

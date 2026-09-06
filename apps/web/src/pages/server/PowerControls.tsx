@@ -45,10 +45,11 @@ export function PowerControls({ server, compact }: { server: Server; compact?: b
 
   return (
     <div className="flex gap-2" style={{ opacity: busy ? 0.6 : 1 }}>
-      <button className="btn primary" disabled={busy || state === 'running'} onClick={() => run('start')}><Icon name="play" size={14} /> Start</button>
-      <button className="btn" disabled={busy || state === 'offline'} onClick={() => run('restart')}><Icon name="restart" size={14} /> Restart</button>
-      <button className="btn" disabled={busy || state === 'offline'} onClick={() => run('stop')}><Icon name="stop" size={14} /> Stop</button>
-      <button className="btn danger" disabled={busy || state === 'offline'} onClick={() => run('kill')}><Icon name="power" size={14} /> Kill</button>
+      <button className="btn primary" disabled={busy || state === 'running' || state === 'suspended'} onClick={() => run('start')}><Icon name="play" size={14} /> Start</button>
+      <button className="btn" disabled={busy || state === 'offline' || state === 'suspended'} onClick={() => run('restart')}><Icon name="restart" size={14} /> Restart</button>
+      <button className="btn" disabled={busy || state === 'offline' || state === 'suspended'} onClick={() => run('stop')}><Icon name="stop" size={14} /> Stop</button>
+      <button className="btn danger" disabled={busy || state === 'offline' || state === 'suspended'} onClick={() => run('kill')}><Icon name="power" size={14} /> Kill</button>
+      {state === 'suspended' && <span className="xs text-3 nowrap">Suspended — resume from Settings</span>}
       {confirm && <KillConfirm server={server} onClose={() => setConfirm(false)} onConfirm={() => run('kill', true)} busy={busy} />}
     </div>
   )

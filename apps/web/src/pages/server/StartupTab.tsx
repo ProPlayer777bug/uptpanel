@@ -54,6 +54,7 @@ export function StartupTab({ server }: { server: Server }) {
   const [name, setName] = useState(server.name || '')
   const [maxBackups, setMaxBackups] = useState(String((server as any).maxBackups ?? 1))
   const [maxAllocations, setMaxAllocations] = useState(String((server as any).maxAllocations ?? 1))
+  const [suspendAfterDays, setSuspendAfterDays] = useState(String((server as any).suspendAfterDays ?? 30))
 
   const load = () => {
     api.get(`/servers/${server.id}/startup`).then((d) => {
@@ -85,6 +86,7 @@ export function StartupTab({ server }: { server: Server }) {
         name: name.trim() || undefined,
         maxBackups: Number(maxBackups) || undefined,
         maxAllocations: Number(maxAllocations) || undefined,
+        suspendAfterDays: Number(suspendAfterDays) || 0,
       })
       toast.ok('Configuration saved')
       refresh()
@@ -116,6 +118,10 @@ export function StartupTab({ server }: { server: Server }) {
           <label>Allocation limit
             <input className="inp" type="number" min={1} max={100} value={maxAllocations} onChange={(e) => setMaxAllocations(e.target.value)} />
             <span className="xs text-3">Max ports/addresses this server may use. Most servers need 1.</span>
+          </label>
+          <label>Auto-suspend after (days)
+            <input className="inp" type="number" min={0} max={365} value={suspendAfterDays} onChange={(e) => setSuspendAfterDays(e.target.value)} />
+            <span className="xs text-3">Suspended automatically once this term lapses unless resumed or extended. Default 30 days; 0 disables.</span>
           </label>
         </div>
 

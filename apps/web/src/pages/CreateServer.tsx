@@ -45,6 +45,7 @@ export function CreateServer({ onClose }: { onClose: () => void }) {
   // allocation count defaults to 1 port — most servers need a single address.
   const [maxBackups, setMaxBackups] = useState('1')
   const [maxAllocations, setMaxAllocations] = useState('1')
+  const [suspendAfterDays, setSuspendAfterDays] = useState('30')
   const lastNodeRef = useRef<string | null>(null)
   useEffect(() => {
     if (node && lastNodeRef.current !== node.id) {
@@ -103,6 +104,7 @@ export function CreateServer({ onClose }: { onClose: () => void }) {
         storageGb: Number(disk),
         maxBackups: Number(maxBackups) || undefined,
         maxAllocations: Number(maxAllocations) || undefined,
+        suspendAfterDays: Number(suspendAfterDays) || 0,
       })
       const serverId = res.server.id
       for (const email of selectedUsers) {
@@ -292,11 +294,28 @@ export function CreateServer({ onClose }: { onClose: () => void }) {
             </div>
             <span className="xs text-3">How many addresses/ports this server may use. Most servers need exactly 1.</span>
           </div>
+          <div className="field">
+            <label>Auto-suspend after (days)</label>
+            <div className="flex" style={{ gap: 8, alignItems: 'center' }}>
+              <input
+                className="input flex-1"
+                type="number"
+                min={0}
+                max={365}
+                value={suspendAfterDays}
+                onChange={(e) => setSuspendAfterDays(e.target.value)}
+              />
+              <span className="xs">day{Number(suspendAfterDays) === 1 ? '' : 's'}</span>
+            </div>
+            <span className="xs text-3">
+              The server is suspended automatically once this term lapses unless resumed or extended. Default 30 days; set 0 to never auto-suspend.
+            </span>
+          </div>
           <div className="card subtle p-2">
             <div className="xs text-3">Summary</div>
             <div className="cell-main">{name || (bp ? `${bp.name} Server` : 'Server')}</div>
             <div className="cell-sub mono xs">
-              {node?.name} · {Number(mem) || 0} MB · {Number(disk) || 0} GB · {cpuCores ? `${cpuCores} core${Number(cpuCores) === 1 ? '' : 's'}` : '1 core'} ({cpuPercent}%) · {Number(maxBackups) || 1} backup limit · {Number(maxAllocations) || 1} max port{Number(maxAllocations) === 1 ? '' : 's'}
+              {node?.name} · {Number(mem) || 0} MB · {Number(disk) || 0} GB · {cpuCores ? `${cpuCores} core${Number(cpuCores) === 1 ? '' : 's'}` : '1 core'} ({cpuPercent}%) · {Number(maxBackups) || 1} backup limit · {Number(maxAllocations) || 1} max port{Number(maxAllocations) === 1 ? '' : 's'} · auto-suspend {Number(suspendAfterDays) > 0 ? `in ${Number(suspendAfterDays)}d` : 'off'}
             </div>
           </div>
         </div>
