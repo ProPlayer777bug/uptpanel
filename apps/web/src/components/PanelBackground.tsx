@@ -1,6 +1,13 @@
 import { useEffect, useState } from 'react'
 import { api } from '../api/client'
 
+const PANEL_T_KEY = 'uh_panel_t'
+const clampT = (v: number) => Math.max(0, Math.min(100, Math.round(v)))
+const storedT = () => {
+  const raw = localStorage.getItem(PANEL_T_KEY)
+  return raw === null ? null : clampT(Number(raw) || 71)
+}
+
 export interface PanelBgConfig {
   enabled: boolean
   kind: 'wallpaper' | 'live'
@@ -15,7 +22,8 @@ export interface PanelBgConfig {
 // instantly without a reload.
 export function PanelBackground() {
   const [bg, setBg] = useState<PanelBgConfig | null>(null)
-  const [panelT, setPanelT] = useState(71)
+  // Per-user transparency: the user's stored preference, else the server default.
+  const [panelT, setPanelT] = useState<number>(() => storedT() ?? 71)
 
   useEffect(() => {
     let alive = true
@@ -23,17 +31,28 @@ export function PanelBackground() {
       try {
         const d = await api.get('/settings/background')
         if (alive) setBg(d.background || null)
-        const p = await api.get('/settings/panel').catch(() => ({ panelT: 71 } as any))
-        if (alive) setPanelT(Math.round(Number(p.panelT ?? 71)))
+        // Only seed from the server default when the user hasn't set their own.
+        if (storedT() === null) {
+          const p = await api.get('/settings/panel').catch(() => ({ panelT: 71 } as any))
+          if (alive && storedT() === null) {
+            const v = clampT(Number(p.panelT ?? 71))
+            localStorage.setItem(PANEL_T_KEY, String(v))
+            setPanelT(v)
+          }
+        }
       } catch { /* ignore: keep current background */ }
     }
     load()
     const t = setInterval(load, 20000)
     const onChanged = () => load()
     const onFocus = () => load()
+    const onStorage = (e: StorageEvent) => {
+      if (e.key === PANEL_T_KEY) setPanelT(storedT() ?? 71)
+    }
     window.addEventListener('uh-bg-changed', onChanged)
     window.addEventListener('focus', onFocus)
-    return () => { alive = false; clearInterval(t); window.removeEventListener('uh-bg-changed', onChanged); window.removeEventListener('focus', onFocus) }
+    window.addEventListener('storage', onStorage)
+    return () => { alive = false; clearInterval(t); window.removeEventListener('uh-bg-changed', onChanged); window.removeEventListener('focus', onFocus); window.removeEventListener('storage', onStorage) }
   }, [])
 
   useEffect(() => {

@@ -1,25 +1,26 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useState } from 'react'
 import { api } from '../api/client'
-import { useApp } from '../state/auth'
 import { Icon } from './ui'
 import { metaOf, type PanelConnection } from './Connections'
 
 const CYCLE_MS = 5000
+const PANEL_T_KEY = 'uh_panel_t'
+
+const clampT = (v: number) => Math.max(0, Math.min(100, Math.round(v)))
+const storedT = () => {
+  const raw = localStorage.getItem(PANEL_T_KEY)
+  return raw === null ? null : clampT(Number(raw) || 71)
+}
 
 // Rotating hitchiker bar at the very top of the panel. Shows one connection at
 // a time, advancing every 5s with a fade/slide transition. Clicking any entry
 // opens the link in a new tab. No bar is rendered when admins haven't added any.
-// Admins also get the universal panel-transparency slider here (top of panel).
+// Every user gets the per-user panel-transparency slider here (top of panel);
+// the server value is only the default when the user hasn't set their own.
 export function ConnectionsTicker() {
-  const { canAdmin } = useApp()
   const [items, setItems] = useState<PanelConnection[] | null>(null)
   const [idx, setIdx] = useState(0)
-  const [panelT, setPanelT] = useState(71)
-  const savedRef = useRef<number | null>(null)
-
-  const loadPanelT = () => {
-    api.get('/settings/panel').then((d: any) => setPanelT(Math.round(Number(d?.panelT ?? 71)))).catch(() => {})
-  }
+  const [panelT, setPanelT] = useState<number>(() => storedT() ?? 71)
 
   useEffect(() => {
     let alive = true
@@ -31,16 +32,29 @@ export function ConnectionsTicker() {
         setIdx((i) => (next.length > 0 ? Math.min(i, next.length - 1) : 0))
       }).catch(() => {})
     }
+    // Seed the stored default once from the server when the user has no
+    // preference of their own yet.
+    if (storedT() === null) {
+      api.get('/settings/panel').then((d: any) => {
+        if (!alive || storedT() !== null) return
+        const v = clampT(Number(d?.panelT ?? 71))
+        localStorage.setItem(PANEL_T_KEY, String(v))
+        setPanelT(v)
+      }).catch(() => {})
+    }
     load()
-    loadPanelT()
     const t = setInterval(load, 20000)
     const onChanged = () => load()
+    const onStorage = (e: StorageEvent) => {
+      if (e.key === PANEL_T_KEY) setPanelT(storedT() ?? 71)
+    }
     window.addEventListener('uh-conn-changed', onChanged)
-    return () => { alive = false; clearInterval(t); window.removeEventListener('uh-conn-changed', onChanged) }
+    window.addEventListener('storage', onStorage)
+    return () => { alive = false; clearInterval(t); window.removeEventListener('uh-conn-changed', onChanged); window.removeEventListener('storage', onStorage) }
   }, [])
 
   useEffect(() => {
-    document.documentElement.style.setProperty('--uh-panel-t', String(Math.max(0, Math.min(100, panelT)) / 100))
+    document.documentElement.style.setProperty('--uh-panel-t', String(clampT(panelT) / 100))
   }, [panelT])
 
   useEffect(() => {
@@ -49,25 +63,26 @@ export function ConnectionsTicker() {
     return () => clearInterval(t)
   }, [items])
 
-  const commit = () => {
-    if (savedRef.current === panelT) return
-    savedRef.current = panelT
-    api.put('/settings/panel', { panelT }).catch(() => {})
-    window.dispatchEvent(new Event('uh-bg-changed'))
+  const change = (v: number) => {
+    const n = clampT(v)
+    setPanelT(n)
+    localStorage.setItem(PANEL_T_KEY, String(n))
   }
 
-  if (!items || items.length === 0) return canAdmin ? (
-    // Still render the bar (no links yet) so admins can reach the transparency slider.
-    <div className="conn-ticker" style={{ justifyContent: 'flex-end' }}>
-      <TickerSlider panelT={panelT} onChange={setPanelT} onCommit={commit} />
+  const bar = (children?: React.ReactNode) => (
+    <div className="conn-ticker" style={children ? undefined : { justifyContent: 'flex-end' }}>
+      {children}
+      <TickerSlider panelT={panelT} onChange={change} />
     </div>
-  ) : null
+  )
+
+  if (!items || items.length === 0) return bar()
 
   const c = items[Math.max(0, Math.min(idx, items.length - 1))]
   const m = metaOf(c?.type)
 
-  return (
-    <div className="conn-ticker">
+  return bar(
+    <>
       <a className="conn-tick-item" key={c.id + idx} href={c.url} target="_blank" rel="noreferrer" title={c.url}>
         <span className="conn-tick-ico"><Icon name={m.icon} size={14} /></span>
         <span className="conn-tick-label">{m.label}</span>
@@ -80,12 +95,11 @@ export function ConnectionsTicker() {
         </div>
       )}
       {items.length > 1 && <div className="conn-tick-progress" />}
-      {canAdmin && <TickerSlider panelT={panelT} onChange={setPanelT} onCommit={commit} />}
-    </div>
+    </>
   )
 }
 
-function TickerSlider({ panelT, onChange, onCommit }: { panelT: number; onChange: (v: number) => void; onCommit: () => void }) {
+function TickerSlider({ panelT, onChange }: { panelT: number; onChange: (v: number) => void }) {
   return (
     <div className="conn-tick-t" title={`Panel transparency: ${panelT}% transparent`}>
       <Icon name="layers" size={12} />
@@ -93,8 +107,6 @@ function TickerSlider({ panelT, onChange, onCommit }: { panelT: number; onChange
         type="range" min={0} max={100} value={panelT}
         aria-label="Panel transparency"
         onChange={(e) => onChange(Number(e.target.value))}
-        onPointerUp={onCommit}
-        onKeyUp={onCommit}
       />
       <span className="conn-tick-t-val">{panelT}%</span>
     </div>
