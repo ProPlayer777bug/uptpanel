@@ -10,11 +10,11 @@ export function General() {
   return (
     <Shell>
       <div className="page" style={{ maxWidth: 900 }}>
-        <div className="page-h"><h1>AIBro &amp; Background</h1><span className="sub">AIBro, panel appearance &amp; connections</span></div>
+        <div className="page-h"><h1>AIBro &amp; Background</h1><span className="sub">AIBro, connections &amp; panel appearance</span></div>
         <div className="grid gap-3">
           <AIBro />
+          <Connections />
           {canAdmin && <CustomizeBackground />}
-          {canAdmin && <Connections />}
         </div>
       </div>
     </Shell>

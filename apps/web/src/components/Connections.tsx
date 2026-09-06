@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import { api } from '../api/client'
+import { useApp } from '../state/auth'
 import { Icon, Spinner, toast } from './ui'
 import type { IconName } from './ui'
 
@@ -25,6 +26,7 @@ export function metaOf(type: string) {
 }
 
 export function Connections() {
+  const { canAdmin } = useApp()
   const [items, setItems] = useState<PanelConnection[] | null>(null)
   const [busy, setBusy] = useState(false)
   const [type, setType] = useState('discord')
@@ -65,26 +67,29 @@ export function Connections() {
   return (
     <div className="card">
       <div className="card-h">
-        <Icon name="webhook" size={15} /> Connections <span className="h-sub">Discord, YouTube, GitHub, Reddit, Xbox &amp; Steam links shown in the ticker at the top of the panel</span>
+        <Icon name="webhook" size={15} /> Connections <span className="h-sub">{canAdmin ? 'Discord, YouTube, GitHub, Reddit, Xbox &amp; Steam links shown in the ticker at the top of the panel' : 'Links for this panel — see the ticker at the top of the page'}</span>
         <div style={{ flex: 1 }} />
         {busy && <Spinner size={15} />}
       </div>
       <div className="card-b">
         {items === null ? <div className="center" style={{ padding: 20 }}><Spinner size={18} /></div> : items.length === 0 ? (
-          <p className="sub xs">No connections yet — add the first one below. It will start showing in the panel ticker.</p>
+          <p className="sub xs">{canAdmin ? 'No connections yet — add the first one below. It will start showing in the panel ticker.' : 'No connections yet.'}</p>
         ) : (
-          <div style={{ maxHeight: '40vh', overflowY: 'auto', marginBottom: 12 }}>
+          <div className="grid" style={{ gridTemplateColumns: 'repeat(auto-fill, minmax(240px, 1fr))', gap: 8, marginBottom: 12 }}>
             {items.map((c) => (
-              <div key={c.id} className="row-item" style={{ alignItems: 'center' }}>
-                <span className="side-ico" style={{ background: 'var(--surface-2)' }}><Icon name={metaOf(c.type).icon} size={15} /></span>
-                <span className="sm" style={{ width: 110, flexShrink: 0 }}>{metaOf(c.type).label}</span>
-                <a className="sm mono flex-1" style={{ minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', color: 'var(--accent)' }} href={c.url} target="_blank" rel="noreferrer">{c.url}</a>
-                <button className="btn sm ghost icon" disabled={busy} title="Remove" onClick={() => remove(c.id)}><Icon name="trash" size={13} /></button>
-              </div>
+              <a key={c.id} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '8px 12px', borderRadius: 8, border: '1px solid var(--line)', background: 'var(--surface)', color: 'var(--text)', textDecoration: 'none', minWidth: 0, overflow: 'hidden' }} href={c.url} target="_blank" rel="noreferrer" title={c.url}>
+                <span style={{ flexShrink: 0 }}><Icon name={metaOf(c.type).icon} size={15} /></span>
+                <span className="sm" style={{ flexShrink: 0 }}>{metaOf(c.type).label}</span>
+                <span className="xs mono flex-1" style={{ minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', color: 'var(--text-2)' }}>{c.url}</span>
+                {canAdmin && (
+                  <button className="btn sm ghost icon" style={{ flexShrink: 0 }} disabled={busy} title="Remove" onClick={(e) => { e.preventDefault(); e.stopPropagation(); remove(c.id) }}><Icon name="trash" size={13} /></button>
+                )}
+              </a>
             ))}
           </div>
         )}
 
+        {canAdmin && (<>
         <div className="flex gap-2 panel-row" style={{ alignItems: 'flex-end', borderTop: '1px solid var(--line)', paddingTop: 12 }}>
           <div className="field">
             <label>Type</label>
@@ -99,6 +104,7 @@ export function Connections() {
           <button className="btn primary" onClick={add} disabled={busy}><Icon name="plus" size={14} /> Add</button>
         </div>
         {ban && <div className="xs mt-2" style={{ color: 'var(--danger)' }}>{ban}</div>}
+        </>)}
       </div>
     </div>
   )

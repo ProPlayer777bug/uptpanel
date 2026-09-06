@@ -1,4 +1,3 @@
-import { useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useApp } from '../state/auth'
 import { useServers, useNodes, useActivity } from '../api/hooks'
@@ -19,7 +18,6 @@ export function Dashboard() {
   const running = summary?.running ?? servers.filter((s) => s.state === 'running').length
   const attention = servers.filter((s) => s.state === 'error').length
   const activity = activityData?.activity ?? []
-  const [showUserMode, setShowUserMode] = useState(false)
 
   // Aggregate node resource utilization from live host stats.
   const nodesOnline = (nodes || []).filter((n) => (n.status as any) === 'online' || n.dockerHealthy)
@@ -44,15 +42,7 @@ export function Dashboard() {
         </div>
         <div style={{ flex: 1 }} />
         {canAdmin && (
-          <Button variant="secondary" icon="user" onClick={() => setShowUserMode(!showUserMode)}>User mode</Button>
-        )}
-        {canAdmin && (
           <Button variant="primary" icon="plus" onClick={() => navigate('/servers/new')}>Create Server</Button>
-        )}
-        {canAdmin && (
-          <Button variant="secondary" icon="user" onClick={() => setShowUserMode(!showUserMode)}>
-            User mode
-          </Button>
         )}
       </div>
 
