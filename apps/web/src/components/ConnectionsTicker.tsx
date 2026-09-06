@@ -17,8 +17,9 @@ export function ConnectionsTicker() {
     const load = () => {
       api.get('/connections').then((d) => {
         if (!alive) return
-        setItems(d.connections || [])
-        setIdx((i) => Math.min(i, (d.connections || []).length - 1))
+        const next = d.connections || []
+        setItems(next)
+        setIdx((i) => (next.length > 0 ? Math.min(i, next.length - 1) : 0))
       }).catch(() => {})
     }
     load()
@@ -35,7 +36,7 @@ export function ConnectionsTicker() {
   }, [items])
 
   if (!items || items.length === 0) return null
-  const c = items[Math.min(idx, items.length - 1)]
+  const c = items[Math.max(0, Math.min(idx, items.length - 1))]
   const m = metaOf(c?.type)
 
   return (
