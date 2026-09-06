@@ -12,7 +12,7 @@ import { Store } from './store/store.js'
 import { seed } from './sim/seed.js'
 import { WsHub } from './ws/hub.js'
 import { randomBytes, timingSafeEqual } from 'node:crypto'
-import { mkdirSync, createWriteStream, createReadStream, existsSync, unlinkSync, statSync } from 'node:fs'
+import { mkdirSync, createWriteStream, createReadStream, existsSync, unlinkSync, statSync, readdirSync } from 'node:fs'
 import { join, extname } from 'node:path'
 import { pipeline } from 'node:stream/promises'
 import { nanoid } from 'nanoid'
@@ -3542,12 +3542,6 @@ app.put('/api/settings/background', { bodyLimit: 450 * 1024 * 1024 }, async (req
   const durationSec = Math.max(1, Math.min(60, Math.round(Number(bg.durationSec) || 5)))
   // Apply target: pc / mobile / both (rendered via CSS media queries).
   const screen = ['pc', 'mobile', 'both'].includes(bg.screen) ? bg.screen : 'both'
-  // Best-effort cleanup of a previously-uploaded media file replaced by this save.
-  const prev = store.db.settings?.background?.url
-  if (prev && prev !== url && /^\/api\/settings\/background\/media\//.test(prev)) {
-    const oldName = prev.split('/').pop() || ''
-    if (BG_MEDIA_NAME_RE.test(oldName)) { try { unlinkSync(join(BG_MEDIA_DIR, oldName)) } catch { /* best-effort */ } }
-  }
   store.db.settings = store.db.settings || {}
   store.db.settings.background = { enabled, kind, url: url || '', durationSec, screen, updatedAt: Date.now(), updatedBy: user.email }
   store.persist()
@@ -3595,6 +3589,48 @@ app.get('/api/settings/background/media/:name', async (req, reply) => {
   const mime = BG_MEDIA_EXT[extname(name).toLowerCase()] || 'application/octet-stream'
   reply.header('Content-Type', mime).header('Cache-Control', 'public, max-age=31536000, immutable')
   return reply.send(createReadStream(file))
+})
+
+// Stored background media library — every uploaded wallpaper/live wallpaper is
+// kept so admins can re-apply any of them without re-uploading.
+app.get('/api/settings/background/media', async (req, reply) => {
+  const user = me(req)
+  if (!user) return reply.code(401).send({ ok: false, error: 'UNAUTHENTICATED' })
+  if (!can(user, 'admin')) return reply.code(403).send({ ok: false, error: 'FORBIDDEN' })
+  let files: { name: string; url: string; kind: 'wallpaper' | 'live'; size: number; addedAt: number }[] = []
+  try {
+    files = readdirSync(BG_MEDIA_DIR)
+      .filter((f) => BG_MEDIA_NAME_RE.test(f) && existsSync(join(BG_MEDIA_DIR, f)))
+      .map((f) => {
+        const isLive = /\.(mp4|webm|mov)$/i.test(f)
+        return {
+          name: f,
+          url: `/api/settings/background/media/${f}`,
+          kind: isLive ? 'live' as const : 'wallpaper' as const,
+          size: statSync(join(BG_MEDIA_DIR, f)).size,
+          addedAt: statSync(join(BG_MEDIA_DIR, f)).mtimeMs,
+        }
+      })
+      .sort((a, b) => b.addedAt - a.addedAt)
+  } catch { /* empty library */ }
+  return { ok: true, media: files }
+})
+
+app.delete('/api/settings/background/media/:name', async (req, reply) => {
+  const user = me(req)
+  if (!user) return reply.code(401).send({ ok: false, error: 'UNAUTHENTICATED' })
+  if (!can(user, 'admin')) return reply.code(403).send({ ok: false, error: 'FORBIDDEN' })
+  const { name } = req.params as any
+  if (!BG_MEDIA_NAME_RE.test(String(name || ''))) return reply.code(404).send({ ok: false, error: 'NOT_FOUND' })
+  const url = `/api/settings/background/media/${name}`
+  if (store.db.settings?.background?.url === url) {
+    return reply.code(400).send({ ok: false, error: 'ACTIVE_MEDIA' })
+  }
+  const file = join(BG_MEDIA_DIR, name)
+  if (!existsSync(file)) return reply.code(404).send({ ok: false, error: 'NOT_FOUND' })
+  unlinkSync(file)
+  audit(store, user.name, 'DELETE_MEDIA', `background:${name}`)
+  return { ok: true }
 })
 
 // ---------------------------------------------------------------------------

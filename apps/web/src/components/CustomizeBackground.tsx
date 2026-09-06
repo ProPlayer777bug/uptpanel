@@ -17,10 +17,19 @@ function readVideoDuration(url: string): Promise<number> {
   })
 }
 
+export interface StoredMedia {
+  name: string
+  url: string
+  kind: 'wallpaper' | 'live'
+  size: number
+  addedAt: number
+}
+
 export function CustomizeBackground() {
   const [cfg, setCfg] = useState<PanelBgConfig | null>(null)
   const [loaded, setLoaded] = useState(false)
   const [loading, setLoading] = useState(false)
+  const [media, setMedia] = useState<StoredMedia[]>([])
   const [mode, setMode] = useState<'off' | 'wallpaper' | 'live'>(cfg?.enabled ? cfg.kind : 'off')
   const [url, setUrl] = useState('')
   const [durationSec, setDurationSec] = useState(5)
@@ -43,6 +52,11 @@ export function CustomizeBackground() {
       .finally(() => setLoaded(true))
   }
   useEffect(() => { load() }, [])
+
+  const loadMedia = () => {
+    api.get('/settings/background/media').then((d) => setMedia(d.media || [])).catch(() => {})
+  }
+  useEffect(() => { loadMedia() }, [])
 
   const dropFile = () => {
     setPendingFile(null)
@@ -79,6 +93,15 @@ export function CustomizeBackground() {
     setBanner('File ready — click Save to upload & apply.')
   }
 
+  const persist = async (enabled: boolean, kind: 'wallpaper' | 'live', finalUrl: string) => {
+    const res = await api.put('/settings/background', {
+      background: { enabled, kind, url: finalUrl, durationSec, screen },
+    })
+    setCfg(res.background as PanelBgConfig)
+    window.dispatchEvent(new Event('uh-bg-changed'))
+    return res
+  }
+
   const save = async () => {
     setLoading(true)
     setBanner('')
@@ -93,16 +116,44 @@ export function CustomizeBackground() {
         finalUrl = up.url || finalUrl
         setUrl(finalUrl)
         dropFile()
+        loadMedia()
       }
-      const res = await api.put('/settings/background', {
-        background: { enabled, kind: mode || 'wallpaper', url: finalUrl, durationSec, screen },
-      })
-      setCfg(res.background as PanelBgConfig)
+      await persist(enabled, mode || 'wallpaper', finalUrl)
       toast.ok(enabled ? 'Background applied to the whole panel' : 'Background removed')
-      window.dispatchEvent(new Event('uh-bg-changed'))
     } catch (e: any) {
       setBanner(e?.message || 'Failed to save background')
       toast.err(e?.message || 'Failed to save background')
+    } finally { setLoading(false) }
+  }
+
+  // Re-apply a stored wallpaper/live wallpaper from the library in one click.
+  const applyStored = async (m: StoredMedia) => {
+    if (m.url === cfg?.url) return
+    setLoading(true)
+    setBanner('')
+    try {
+      await persist(true, m.kind, m.url)
+      setMode(m.kind)
+      setUrl(m.url)
+      dropFile()
+      toast.ok(`${m.kind === 'live' ? 'Live wallpaper' : 'Wallpaper'} applied from library`)
+    } catch (e: any) {
+      setBanner(e?.message || 'Failed to apply')
+      toast.err(e?.message || 'Failed to apply')
+    } finally { setLoading(false) }
+  }
+
+  const deleteMedia = async (m: StoredMedia) => {
+    setLoading(true)
+    setBanner('')
+    try {
+      await api.del(`/settings/background/media/${encodeURIComponent(m.name)}`)
+      setMedia((prev) => prev.filter((x) => x.name !== m.name))
+      toast.ok('Removed from library')
+    } catch (e: any) {
+      const msg = e?.message || 'Failed to remove'
+      if (/ACTIVE_MEDIA/.test(msg)) toast.err('That one is active — apply a different background first')
+      else { setBanner(msg); toast.err(msg) }
     } finally { setLoading(false) }
   }
 
@@ -217,6 +268,39 @@ export function CustomizeBackground() {
               </div>
             )}
           </>
+        )}
+
+        {media.length > 0 && (
+          <div className="mt-3">
+            <div className="flex" style={{ alignItems: 'center', gap: 8, marginBottom: 8 }}>
+              <span className="sm" style={{ fontWeight: 600, color: 'var(--text-2)' }}>Stored library</span>
+              <span className="xs text-3">Click any wallpaper to apply it again — no re-upload needed.</span>
+              <div style={{ flex: 1 }} />
+              <button className="btn sm ghost icon" title="Refresh library" disabled={loading} onClick={loadMedia}><Icon name="refresh" size={13} /></button>
+            </div>
+            <div className="media-grid">
+              {media.map((m) => {
+                const active = m.url === cfg?.url
+                return (
+                  <div key={m.name} className={`media-tile${active ? ' active' : ''}`} title={active ? `${m.kind} — active` : `Apply this ${m.kind}`} onClick={() => applyStored(m)}>
+                    <div className="media-prev">
+                      {m.kind === 'live' ? (
+                        <video src={m.url} muted preload="metadata" playsInline />
+                      ) : (
+                        <div style={{ background: `var(--bg) center/cover no-repeat url(${m.url})` }} />
+                      )}
+                      {active && <span className="media-active-badge">active</span>}
+                      <button className="btn sm ghost icon media-del" disabled={loading} title="Remove from library" onClick={(e) => { e.stopPropagation(); deleteMedia(m) }}><Icon name="trash" size={13} /></button>
+                    </div>
+                    <div className="media-meta">
+                      <span className="badge xs media-kind">{m.kind === 'live' ? 'live' : 'image'}</span>
+                      <span className="xs text-3 nowrap" style={{ overflow: 'hidden', textOverflow: 'ellipsis' }}>{(m.size / 1048576).toFixed(1)} MB</span>
+                    </div>
+                  </div>
+                )
+              })}
+            </div>
+          </div>
         )}
       </div>
     </div>

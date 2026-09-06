@@ -43,7 +43,7 @@
 
   /* Universal panel transparency (0-100%): glass aliases of the surface tokens
      so the WHOLE panel — cards, sidebar, inputs, tables, ticker — blends with
-     whatever is behind it. 0 = opaque (default), 100 = fully see-through. */
+     whatever is behind it. 0 = opaque, 100 = fully see-through (default 71). */
   --uh-panel-t: 0.71;
   --uh-surface: color-mix(in srgb, var(--surface) calc((1 - var(--uh-panel-t)) * 100%), transparent);
   --uh-surface-2: color-mix(in srgb, var(--surface-2) calc((1 - var(--uh-panel-t)) * 100%), transparent);
@@ -570,6 +570,31 @@ html.uh-bg .login-wrap { background: transparent; }
 .input.sm, .select.sm { padding: 6px 10px; font-size: 12px; }
 .input.mono { font-family: var(--font-mono); font-size: 13px; }
 input[type='range'] { accent-color: var(--accent); height: 20px; cursor: pointer; }
+
+/* Stored background media library (Customize background) */
+.media-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(132px, 1fr)); gap: 8px; }
+.media-tile {
+  border: 1px solid var(--line); border-radius: 8px; overflow: hidden;
+  background: var(--surface-sunken); cursor: pointer;
+  transition: border-color var(--speed), transform var(--speed);
+}
+.media-tile:hover { border-color: var(--accent-line); transform: translateY(-1px); }
+.media-tile.active { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent-soft); }
+.media-prev { position: relative; height: 78px; background: var(--bg); }
+.media-prev > video, .media-prev > div { width: 100%; height: 100%; object-fit: cover; background-size: cover; background-position: center; }
+.media-active-badge {
+  position: absolute; left: 6px; bottom: 6px;
+  font-size: 10px; font-weight: 600; color: #04313e;
+  background: var(--accent-strong); border-radius: 4px; padding: 1px 6px;
+}
+.media-del {
+  position: absolute; right: 4px; top: 4px;
+  background: rgba(0, 0, 0, 0.55) !important; color: #fff !important;
+  border: none !important;
+}
+.media-del:hover { background: rgba(0, 0, 0, 0.8) !important; }
+.media-meta { display: flex; align-items: center; gap: 6px; padding: 5px 8px; }
+.media-kind { text-transform: uppercase; font-size: 9px; letter-spacing: 0.04em; }
 .select { appearance: none; padding-right: 30px; cursor: pointer; }
 select.select option { background: var(--uh-surface); color: var(--text); }
 textarea.input { resize: vertical; min-height: 80px; }
