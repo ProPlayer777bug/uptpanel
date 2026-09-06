@@ -15,7 +15,7 @@ export interface PanelBgConfig {
 // instantly without a reload.
 export function PanelBackground() {
   const [bg, setBg] = useState<PanelBgConfig | null>(null)
-  const [panelT, setPanelT] = useState(100)
+  const [panelT, setPanelT] = useState(0)
 
   useEffect(() => {
     let alive = true
@@ -23,8 +23,8 @@ export function PanelBackground() {
       try {
         const d = await api.get('/settings/background')
         if (alive) setBg(d.background || null)
-        const p = await api.get('/settings/panel').catch(() => ({ panelT: 100 } as any))
-        if (alive) setPanelT(Math.round(Number(p.panelT ?? 100)))
+        const p = await api.get('/settings/panel').catch(() => ({ panelT: 0 } as any))
+        if (alive) setPanelT(Math.round(Number(p.panelT ?? 0)))
       } catch { /* ignore: keep current background */ }
     }
     load()

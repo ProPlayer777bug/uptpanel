@@ -32,15 +32,11 @@ export function Connections() {
   const [type, setType] = useState('discord')
   const [url, setUrl] = useState('')
   const [ban, setBan] = useState('')
-  const [panelT, setPanelT] = useState(100)
 
   const load = () => {
     api.get('/connections').then((d) => setItems(d.connections || [])).catch((e: any) => toast.err(e?.message))
   }
   useEffect(() => { load() }, [])
-  useEffect(() => {
-    api.get('/settings/panel').then((d: any) => setPanelT(Math.round(Number(d?.panelT ?? 100)))).catch(() => {})
-  }, [])
 
   const persist = async (next: PanelConnection[], what: string) => {
     setBusy(true)
@@ -68,22 +64,6 @@ export function Connections() {
 
   const meta = metaOf(type)
 
-  const savePanelT = async () => {
-    setBusy(true)
-    setBan('')
-    try {
-      await api.put('/settings/panel', { panelT })
-      toast.ok('Panel transparency saved')
-    } catch (e: any) { setBan(e?.message || 'Failed to save panel transparency'); toast.err(e?.message) }
-    finally { setBusy(false) }
-  }
-
-  const setTransparency = (v: number) => {
-    setPanelT(v)
-    // Live preview — the same value is re-applied from the server on reload.
-    document.documentElement.style.setProperty('--uh-panel-t', String(v / 100))
-  }
-
   return (
     <div className="card">
       <div className="card-h">
@@ -92,17 +72,6 @@ export function Connections() {
         {busy && <Spinner size={15} />}
       </div>
       <div className="card-b">
-        {canAdmin && (
-          <div className="field mb-3" style={{ maxWidth: 460 }}>
-            <label>Panel transparency: {panelT}%</label>
-            <div className="flex" style={{ gap: 10, alignItems: 'center' }}>
-              <input type="range" min={0} max={100} value={panelT} style={{ flex: 1 }} onChange={(e) => setTransparency(Number(e.target.value))} />
-              <button className="btn sm primary" disabled={busy} onClick={savePanelT}><Icon name="check" size={13} /> Save</button>
-            </div>
-            <span className="xs text-3">How see-through the whole panel is — sidebar, pages and cards. 100% lets the wallpaper show through fully, 0% is solid surfaces.</span>
-          </div>
-        )}
-
         {items === null ? <div className="center" style={{ padding: 20 }}><Spinner size={18} /></div> : items.length === 0 ? (
           <p className="sub xs">{canAdmin ? 'No connections yet — add the first one below. It will start showing in the panel ticker.' : 'No connections yet.'}</p>
         ) : (

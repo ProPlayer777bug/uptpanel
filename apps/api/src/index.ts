@@ -3492,7 +3492,7 @@ const panelTStored = () => {
   if (typeof s?.panelT === 'number') return s.panelT
   // one-time migration: was previously stored inside settings.background
   if (typeof s?.background?.panelT === 'number') return s.background.panelT
-  return 100
+  return 0
 }
 app.get('/api/settings/panel', async (req, reply) => {
   return { ok: true, panelT: Math.max(0, Math.min(100, Math.round(panelTStored()))) }
@@ -3501,7 +3501,8 @@ app.put('/api/settings/panel', async (req, reply) => {
   const user = me(req)
   if (!user) return reply.code(401).send({ ok: false, error: 'UNAUTHENTICATED' })
   if (!can(user, 'admin')) return reply.code(403).send({ ok: false, error: 'FORBIDDEN' })
-  const panelT = Math.max(0, Math.min(100, Math.round(Number(((req.body || {}) as any).panelT)) || 100))
+  const raw = Number(((req.body || {}) as any).panelT)
+  const panelT = Number.isFinite(raw) ? Math.max(0, Math.min(100, Math.round(raw))) : 0
   store.db.settings = store.db.settings || {}
   store.db.settings.panelT = panelT
   store.persist()
