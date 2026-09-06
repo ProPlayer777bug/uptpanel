@@ -6,6 +6,7 @@ export interface PanelBgConfig {
   kind: 'wallpaper' | 'live'
   url: string
   durationSec: number
+  screen?: 'pc' | 'mobile' | 'both'
 }
 
 // Global panel background layer. Fetches the admin-configured background (which
@@ -38,18 +39,15 @@ export function PanelBackground() {
 
   if (!bg?.enabled || !bg.url) return null
 
-  if (bg.kind === 'live') {
-    return (
-      <div className="panel-bg-layer" aria-hidden>
-        <video key={bg.url} src={bg.url} autoPlay muted loop playsInline />
-        <div className="panel-bg-scrim" />
-      </div>
-    )
-  }
-  return (
-    <div className="panel-bg-layer" aria-hidden>
-      <div className="panel-bg-img" style={{ backgroundImage: `url(${bg.url})` }} />
+  const layer = (children: React.ReactNode) => (
+    <div className="panel-bg-layer" data-screen={bg.screen || 'both'} aria-hidden>
+      {children}
       <div className="panel-bg-scrim" />
     </div>
   )
+
+  if (bg.kind === 'live') {
+    return layer(<video key={bg.url} src={bg.url} autoPlay muted loop playsInline />)
+  }
+  return layer(<div className="panel-bg-img" style={{ backgroundImage: `url(${bg.url})` }} />)
 }

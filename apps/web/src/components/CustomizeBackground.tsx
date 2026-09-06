@@ -33,6 +33,7 @@ export function CustomizeBackground() {
   const [mode, setMode] = useState<'off' | 'wallpaper' | 'live'>(cfg?.enabled ? cfg.kind : 'off')
   const [url, setUrl] = useState('')
   const [durationSec, setDurationSec] = useState(5)
+  const [screen, setScreen] = useState<'pc' | 'mobile' | 'both'>('both')
   const [banner, setBanner] = useState('')
   const fileRef = useRef<HTMLInputElement>(null)
 
@@ -43,6 +44,7 @@ export function CustomizeBackground() {
       setMode(bg?.enabled ? bg.kind : 'off')
       setUrl(bg?.url || '')
       setDurationSec(bg?.durationSec || 5)
+      setScreen((bg?.screen as 'pc' | 'mobile' | 'both') || 'both')
     }).catch((e: any) => toast.err(e?.message))
       .finally(() => setLoaded(true))
   }
@@ -81,7 +83,7 @@ export function CustomizeBackground() {
     try {
       const enabled = mode !== 'off'
       const res = await api.put('/settings/background', {
-        background: { enabled, kind: mode || 'wallpaper', url: url.trim(), durationSec },
+        background: { enabled, kind: mode || 'wallpaper', url: url.trim(), durationSec, screen },
       })
       setCfg(res.background as PanelBgConfig)
       toast.ok(enabled ? 'Background applied to the whole panel' : 'Background removed')
@@ -96,11 +98,12 @@ export function CustomizeBackground() {
     setLoading(true)
     setBanner('')
     try {
-      await api.put('/settings/background', { background: { enabled: false, kind: 'wallpaper', url: '', durationSec: 5 } })
+      await api.put('/settings/background', { background: { enabled: false, kind: 'wallpaper', url: '', durationSec: 5, screen: 'both' } })
       setCfg(null)
       setMode('off')
       setUrl('')
       setDurationSec(5)
+      setScreen('both')
       toast.ok('Restored the default panel background')
       window.dispatchEvent(new Event('uh-bg-changed'))
     } catch (e: any) {
@@ -153,6 +156,14 @@ export function CustomizeBackground() {
                   <span className="xs text-3">Live clips are capped at 10 seconds.</span>
                 </div>
               )}
+            </div>
+
+            <div className="flex gap-1 mt-2" style={{ flexWrap: 'wrap', alignItems: 'center' }}>
+              <span className="xs text-3" style={{ marginRight: 4 }}>Apply to:</span>
+              <button className={`btn ${screen === 'both' ? 'subtle' : 'ghost'}`} onClick={() => setScreen('both')}>PC &amp; mobile</button>
+              <button className={`btn ${screen === 'pc' ? 'subtle' : 'ghost'}`} onClick={() => setScreen('pc')}>PC only</button>
+              <button className={`btn ${screen === 'mobile' ? 'subtle' : 'ghost'}`} onClick={() => setScreen('mobile')}>Mobile only</button>
+              <span className="xs text-3">Which devices see this background.</span>
             </div>
 
             <div className="flex mt-2" style={{ gap: 10, alignItems: 'center' }}>

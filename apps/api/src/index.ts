@@ -3493,11 +3493,13 @@ app.put('/api/settings/background', { bodyLimit: 32 * 1024 * 1024 }, async (req,
     }
   }
   const durationSec = Math.max(1, Math.min(10, Math.round(Number(bg.durationSec) || 5)))
+  // Apply target: pc / mobile / both (rendered via CSS media queries).
+  const screen = ['pc', 'mobile', 'both'].includes(bg.screen) ? bg.screen : 'both'
   store.db.settings = store.db.settings || {}
-  store.db.settings.background = { enabled, kind, url: url || '', durationSec, updatedAt: Date.now(), updatedBy: user.email }
+  store.db.settings.background = { enabled, kind, url: url || '', durationSec, screen, updatedAt: Date.now(), updatedBy: user.email }
   store.persist()
   activity(user, 'server', 'info', 'Updated panel background', { kind })
-  audit(store, user.name, 'EDIT_CONFIG', `panel background (${kind}, ${durationSec}s)`)
+  audit(store, user.name, 'EDIT_CONFIG', `panel background (${kind}, ${durationSec}s, ${screen})`)
   return { ok: true, background: store.db.settings.background }
 })
 

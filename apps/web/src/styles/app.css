@@ -132,6 +132,12 @@ button { font-family: var(--font-ui); }
 html.uh-bg .shell { background: transparent !important; }
 html.uh-bg .login-wrap { background: transparent; }
 
+/* Apply-target: the admin can set a wallpaper for desktop, mobile, or both. */
+.panel-bg-layer[data-screen='pc'] { display: none; }
+@media (min-width: 701px) { .panel-bg-layer[data-screen='pc'] { display: block; } }
+.panel-bg-layer[data-screen='mobile'] { display: none; }
+@media (max-width: 700px) { .panel-bg-layer[data-screen='mobile'] { display: block; } }
+
 /* Connections ticker — rotating admin-managed links at the top of the shell */
 .conn-ticker {
   position: relative;
