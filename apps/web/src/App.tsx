@@ -17,6 +17,7 @@ const Locations = lazy(() => import('./pages/Locations').then((m) => ({ default:
 const Activity = lazy(() => import('./pages/Activity').then((m) => ({ default: m.Activity })))
 const Account = lazy(() => import('./pages/Account').then((m) => ({ default: m.Account })))
 const General = lazy(() => import('./pages/General').then((m) => ({ default: m.General })))
+const ConnectionsPage = lazy(() => import('./pages/Connections').then((m) => ({ default: m.ConnectionsPage })))
 const Alerts = lazy(() => import('./pages/Alerts').then((m) => ({ default: m.Alerts })))
 const Templates = lazy(() => import('./pages/Templates').then((m) => ({ default: m.Templates })))
 const Users = lazy(() => import('./pages/Users').then((m) => ({ default: m.Users })))
@@ -80,6 +81,7 @@ export default function App() {
         <Route path="/account" element={<Page><Account /></Page>} />
         <Route path="/account/api-keys" element={<Page><Account focus="api-keys" /></Page>} />
         <Route path="/general" element={<Page><General /></Page>} />
+        <Route path="/connections" element={<Page><ConnectionsPage /></Page>} />
         <Route path="/themes" element={<Page><Themes /></Page>} />
         <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>

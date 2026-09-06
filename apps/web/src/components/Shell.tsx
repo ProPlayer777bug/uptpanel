@@ -18,6 +18,7 @@ const NAV_GROUPS: { title: string; admin?: boolean; items: NavItem[] }[] = [
       { to: '/servers', label: 'Servers', icon: 'server' },
       { to: '/themes', label: 'Themes', icon: 'palette' },
       { to: '/general', label: 'AIBro & Background', icon: 'image' },
+      { to: '/connections', label: 'Connections', icon: 'webhook' },
       { to: '/account', label: 'Settings', icon: 'user' },
     ],
   },
@@ -257,6 +258,7 @@ function crumbLabel(pathname: string): string {
   if (pathname.startsWith('/activity')) return 'Activity'
   if (pathname.startsWith('/auth-providers')) return 'Auth Providers'
   if (pathname.startsWith('/general')) return 'AIBro & Background'
+  if (pathname.startsWith('/connections')) return 'Connections'
   if (pathname.startsWith('/account')) return 'Account'
   const seg = pathname.split('/').filter(Boolean)
   return (seg[seg.length - 1] || 'Page').replace(/^./, (c) => c.toUpperCase())
