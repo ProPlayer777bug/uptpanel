@@ -12,5 +12,12 @@ export default defineConfig({
       '/ws': { target: 'ws://localhost:8081', ws: true },
     },
   },
-  build: { outDir: 'dist' },
+  build: {
+    outDir: 'dist',
+    // Hashed assets are content-addressed + immutable: keep previous builds'
+    // chunks on disk instead of wiping dist so tabs already open across a
+    // redeploy can still fetch their lazy chunks. Old files are pruned by
+    // scripts/prune-dist.mjs (mtime older than 30 days).
+    emptyOutDir: false,
+  },
 })
