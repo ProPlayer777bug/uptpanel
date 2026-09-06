@@ -3484,6 +3484,31 @@ app.get('/api/settings/background', async (req, reply) => {
   return { ok: true, background: store.db.settings?.background || null }
 })
 
+// Universal panel transparency (0-100%). Independent of the background — it
+// controls --uh-panel-t which color-mixes .shell/.sidebar/.card over whatever
+// sits behind the panel (the wallpaper when one is set, otherwise the theme bg).
+const panelTStored = () => {
+  const s = store.db.settings
+  if (typeof s?.panelT === 'number') return s.panelT
+  // one-time migration: was previously stored inside settings.background
+  if (typeof s?.background?.panelT === 'number') return s.background.panelT
+  return 100
+}
+app.get('/api/settings/panel', async (req, reply) => {
+  return { ok: true, panelT: Math.max(0, Math.min(100, Math.round(panelTStored()))) }
+})
+app.put('/api/settings/panel', async (req, reply) => {
+  const user = me(req)
+  if (!user) return reply.code(401).send({ ok: false, error: 'UNAUTHENTICATED' })
+  if (!can(user, 'admin')) return reply.code(403).send({ ok: false, error: 'FORBIDDEN' })
+  const panelT = Math.max(0, Math.min(100, Math.round(Number(((req.body || {}) as any).panelT)) || 100))
+  store.db.settings = store.db.settings || {}
+  store.db.settings.panelT = panelT
+  store.persist()
+  audit(store, user.name, 'EDIT_CONFIG', `panel transparency ${panelT}%`)
+  return { ok: true, panelT }
+})
+
 app.put('/api/settings/background', { bodyLimit: 450 * 1024 * 1024 }, async (req, reply) => {
   const user = me(req)
   if (!user) return reply.code(401).send({ ok: false, error: 'UNAUTHENTICATED' })
@@ -3516,8 +3541,6 @@ app.put('/api/settings/background', { bodyLimit: 450 * 1024 * 1024 }, async (req
   const durationSec = Math.max(1, Math.min(60, Math.round(Number(bg.durationSec) || 5)))
   // Apply target: pc / mobile / both (rendered via CSS media queries).
   const screen = ['pc', 'mobile', 'both'].includes(bg.screen) ? bg.screen : 'both'
-  // Panel transparency %: 100 = fully see-through (current default), 0 = opaque.
-  const panelT = bg.panelT == null ? 100 : Math.max(0, Math.min(100, Math.round(Number(bg.panelT))))
   // Best-effort cleanup of a previously-uploaded media file replaced by this save.
   const prev = store.db.settings?.background?.url
   if (prev && prev !== url && /^\/api\/settings\/background\/media\//.test(prev)) {
@@ -3525,7 +3548,7 @@ app.put('/api/settings/background', { bodyLimit: 450 * 1024 * 1024 }, async (req
     if (BG_MEDIA_NAME_RE.test(oldName)) { try { unlinkSync(join(BG_MEDIA_DIR, oldName)) } catch { /* best-effort */ } }
   }
   store.db.settings = store.db.settings || {}
-  store.db.settings.background = { enabled, kind, url: url || '', durationSec, screen, panelT, updatedAt: Date.now(), updatedBy: user.email }
+  store.db.settings.background = { enabled, kind, url: url || '', durationSec, screen, updatedAt: Date.now(), updatedBy: user.email }
   store.persist()
   activity(user, 'server', 'info', 'Updated panel background', { kind })
   audit(store, user.name, 'EDIT_CONFIG', `panel background (${kind}, ${durationSec}s, ${screen})`)

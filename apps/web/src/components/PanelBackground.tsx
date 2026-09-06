@@ -7,7 +7,6 @@ export interface PanelBgConfig {
   url: string
   durationSec: number
   screen?: 'pc' | 'mobile' | 'both'
-  panelT?: number
 }
 
 // Global panel background layer. Fetches the admin-configured background (which
@@ -16,6 +15,7 @@ export interface PanelBgConfig {
 // instantly without a reload.
 export function PanelBackground() {
   const [bg, setBg] = useState<PanelBgConfig | null>(null)
+  const [panelT, setPanelT] = useState(100)
 
   useEffect(() => {
     let alive = true
@@ -23,6 +23,8 @@ export function PanelBackground() {
       try {
         const d = await api.get('/settings/background')
         if (alive) setBg(d.background || null)
+        const p = await api.get('/settings/panel').catch(() => ({ panelT: 100 } as any))
+        if (alive) setPanelT(Math.round(Number(p.panelT ?? 100)))
       } catch { /* ignore: keep current background */ }
     }
     load()
@@ -38,12 +40,12 @@ export function PanelBackground() {
     document.documentElement.classList.toggle('uh-bg', !!bg?.enabled)
   }, [bg])
 
+  // Universal panel transparency 0-100 (100 = fully see-through). Drives
+  // color-mix() alpha for .shell/.sidebar/.card in app.css via --uh-panel-t
+  // (0..1). Independent of whether a background is set.
   useEffect(() => {
-    // Panel transparency 0-100 (100 = fully see-through). Drives color-mix()
-    // alpha for .shell/.sidebar/.card in app.css via --uh-panel-t (0..1).
-    const t = Math.max(0, Math.min(100, Number(bg?.panelT ?? 100) || 100)) / 100
-    document.documentElement.style.setProperty('--uh-panel-t', String(t))
-  }, [bg])
+    document.documentElement.style.setProperty('--uh-panel-t', String(Math.max(0, Math.min(100, panelT)) / 100))
+  }, [panelT])
 
   if (!bg?.enabled || !bg.url) return null
 

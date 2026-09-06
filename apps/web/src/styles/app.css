@@ -40,6 +40,7 @@
   --accent-soft: rgba(8, 145, 178, 0.15);
   --accent-line: rgba(8, 145, 178, 0.4);
   --focus: rgba(8, 145, 178, 0.5);
+  --uh-panel-t: 1;
 }
 
 /* ---------- Dark (default — matches Pterodactyl neutral-800) ---------- */
@@ -120,7 +121,7 @@ button { font-family: var(--font-ui); }
 /* ============================================================
    Layout shell — left sidebar + top bar (redesigned)
    ============================================================ */
-.shell { display: flex; height: 100vh; overflow: hidden; background: var(--bg); }
+.shell { display: flex; height: 100vh; overflow: hidden; background: color-mix(in srgb, var(--bg) calc((1 - var(--uh-panel-t, 1)) * 100%), transparent); }
 
 /* Panel background layer: fixed, sits behind the app so a wallpaper or a short
    live wallpaper (<=10s loop) can show around the panes. While active, the
@@ -129,17 +130,6 @@ button { font-family: var(--font-ui); }
 .panel-bg-layer .panel-bg-img { position: absolute; inset: 0; background-size: cover; background-position: center; }
 .panel-bg-layer video { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
 .panel-bg-scrim { position: absolute; inset: 0; background: linear-gradient(180deg, rgba(0,0,0,0.35), rgba(0,0,0,0.55)); }
-html.uh-bg .shell {
-  background: color-mix(in srgb, var(--bg) calc((1 - var(--uh-panel-t, 1)) * 100%), transparent) !important;
-}
-
-html.uh-bg .sidebar {
-  background: color-mix(in srgb, var(--neutral-900) calc((1 - var(--uh-panel-t, 1)) * 100%), transparent);
-}
-
-html.uh-bg .card {
-  background: color-mix(in srgb, var(--surface) calc((1 - var(--uh-panel-t, 1) * 0.6) * 100%), transparent);
-}
 html.uh-bg .login-wrap { background: transparent; }
 
 /* Apply-target: the admin can set a wallpaper for desktop, mobile, or both. */
@@ -200,7 +190,7 @@ html.uh-bg .login-wrap { background: transparent; }
 /* --- Sidebar --- */
 .sidebar {
   width: 232px; flex-shrink: 0;
-  background: var(--neutral-900);
+  background: color-mix(in srgb, var(--neutral-900) calc((1 - var(--uh-panel-t, 1)) * 100%), transparent);
   border-right: 1px solid rgba(0, 0, 0, 0.2);
   display: flex; flex-direction: column;
   transition: width var(--dur-panel) var(--ease);
@@ -435,7 +425,7 @@ html.uh-bg .login-wrap { background: transparent; }
    Cards & panels — Pterodactyl content boxes
    ============================================================ */
 .card {
-  background: var(--surface);
+  background: color-mix(in srgb, var(--surface) calc((1 - var(--uh-panel-t, 1) * 0.6) * 100%), transparent);
   border-radius: var(--r-lg);
   box-shadow: var(--shadow-sm);
   overflow: hidden;
