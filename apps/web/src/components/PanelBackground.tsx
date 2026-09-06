@@ -38,6 +38,7 @@ export function PanelBackground() {
   const [bg, setBg] = useState<PanelBgConfig | null>(null)
   const [slides, setSlides] = useState(false)
   const [interSec, setInterSec] = useState(600)
+  const [mediaLen, setMediaLen] = useState(0)
   // Per-user transparency: the user's stored preference, else the server default.
   const [panelT, setPanelT] = useState<number>(() => storedT() ?? 71)
 
@@ -73,6 +74,7 @@ export function PanelBackground() {
 
         const ml = await api.get('/settings/background/media').catch(() => ({ media: [] } as any))
         mediaRef.current = ml.media || []
+        setMediaLen(mediaRef.current.length)
 
         if (on && enabledRef.current && mediaRef.current.length >= 2) {
           if (idxRef.current === -1) {
@@ -109,16 +111,21 @@ export function PanelBackground() {
     return () => { aliveRef.current = false; clearInterval(t); window.removeEventListener('uh-bg-changed', onChanged); window.removeEventListener('focus', onFocus); window.removeEventListener('storage', onStorage) }
   }, [])
 
-  // Slideshow rotation: advance one stored media every intervalSec.
+  // Slideshow rotation: advance one stored media every intervalSec. mediaLen is
+  // a state copy of the list length so the timer is (re)created the moment the
+  // media list finishes loading — otherwise the effect sees an empty list at
+  // setup (media loads after the slideshow flag flips) and never schedules.
   useEffect(() => {
-    if (!slides || mediaRef.current.length < 2) return
+    if (!slides || mediaLen < 2) return
     const t = setInterval(() => {
-      if (idxRef.current === -1) idxRef.current = 0
-      idxRef.current = (idxRef.current + 1) % mediaRef.current.length
+      const n = mediaRef.current.length
+      if (n < 2) return
+      if (idxRef.current === -1 || idxRef.current >= n) idxRef.current = 0
+      idxRef.current = (idxRef.current + 1) % n
       showSlide(idxRef.current)
     }, interSec * 1000)
     return () => clearInterval(t)
-  }, [slides, interSec])
+  }, [slides, interSec, mediaLen])
 
   useEffect(() => {
     document.documentElement.classList.toggle('uh-bg', !!bg?.enabled)
