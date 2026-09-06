@@ -4,7 +4,7 @@ import { Icon, Spinner, toast } from './ui'
 import type { PanelBgConfig } from './PanelBackground'
 
 const MAX_IMAGE = 15 * 1024 * 1024
-const MAX_VIDEO = 28 * 1024 * 1024
+const MAX_VIDEO = 300 * 1024 * 1024
 
 async function fileToDataUrl(file: File): Promise<string> {
   return new Promise((resolve, reject) => {
@@ -171,7 +171,7 @@ export function CustomizeBackground() {
                 <Icon name="upload" size={13} /> Upload {mode === 'wallpaper' ? 'image' : 'video'} file
               </button>
               <input ref={fileRef} type="file" accept={mode === 'wallpaper' ? 'image/*' : 'video/*'} style={{ display: 'none' }} onChange={pickFile} />
-              <span className="xs text-3">{mode === 'wallpaper' ? 'PNG/JPG/GIF/WEBP, 15 MB max.' : 'MP4/WEBM, 10s max, 28 MB max.'}</span>
+              <span className="xs text-3">{mode === 'wallpaper' ? 'PNG/JPG/GIF/WEBP, 15 MB max.' : 'MP4/WEBM, 10s max, 300 MB max.'}</span>
             </div>
 
             {banner && <div className="xs mt-2" style={{ color: 'var(--danger)' }}>{banner}</div>}

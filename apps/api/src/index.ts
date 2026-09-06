@@ -3469,7 +3469,7 @@ app.get('/api/settings/background', async (req, reply) => {
   return { ok: true, background: store.db.settings?.background || null }
 })
 
-app.put('/api/settings/background', { bodyLimit: 32 * 1024 * 1024 }, async (req, reply) => {
+app.put('/api/settings/background', { bodyLimit: 450 * 1024 * 1024 }, async (req, reply) => {
   const user = me(req)
   if (!user) return reply.code(401).send({ ok: false, error: 'UNAUTHENTICATED' })
   if (!can(user, 'admin')) return reply.code(403).send({ ok: false, error: 'FORBIDDEN' })
