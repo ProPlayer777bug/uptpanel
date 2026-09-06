@@ -3416,6 +3416,38 @@ app.put('/api/settings/background', { bodyLimit: 32 * 1024 * 1024 }, async (req,
   return { ok: true, background: store.db.settings.background }
 })
 
+// ---------------------------------------------------------------------------
+// Panel connections — social/discord/etc links admins surface to users via the
+// rotating ticker at the top of the panel.
+const CONNECTION_TYPES = ['discord', 'youtube', 'github', 'reddit', 'xbox', 'steam']
+
+app.get('/api/connections', async (_req, reply) => {
+  return { ok: true, connections: store.db.settings?.connections || [] }
+})
+
+app.put('/api/connections', async (req, reply) => {
+  const user = me(req)
+  if (!user) return reply.code(401).send({ ok: false, error: 'UNAUTHENTICATED' })
+  if (!can(user, 'admin')) return reply.code(403).send({ ok: false, error: 'FORBIDDEN' })
+  const body = (req.body || {}) as any
+  const raw = Array.isArray(body.connections) ? body.connections : []
+  if (raw.length > 12) return reply.code(400).send({ ok: false, error: 'TOO_MANY_CONNECTIONS' })
+  const conns: any[] = []
+  for (const c of raw) {
+    const type = String(c?.type || '')
+    if (!CONNECTION_TYPES.includes(type)) return reply.code(400).send({ ok: false, error: 'INVALID_TYPE' })
+    const url = String(c?.url || '').trim()
+    if (!/^https?:\/\//i.test(url)) return reply.code(400).send({ ok: false, error: 'INVALID_URL' })
+    if (url.length > 500) return reply.code(400).send({ ok: false, error: 'INVALID_URL' })
+    conns.push({ id: typeof c?.id === 'string' && c.id ? c.id : `c-${nanoid(8)}`, type, url, addedAt: Number(c?.addedAt) || Date.now(), addedBy: user.email })
+  }
+  store.db.settings = store.db.settings || {}
+  store.db.settings.connections = conns
+  store.persist()
+  audit(store, user.name, 'EDIT_CONFIG', `panel connections (${conns.length})`)
+  return { ok: true, connections: conns }
+})
+
 // Background cron ticker — every 10s check due schedules (per-minute granularity).
 setInterval(() => {
   for (const schedule of store.db.schedules) {

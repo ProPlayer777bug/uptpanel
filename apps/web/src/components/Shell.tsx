@@ -3,6 +3,7 @@ import { Link, useLocation, useNavigate } from 'react-router-dom'
 import { useApp } from '../state/auth'
 import { useTheme } from '../theme/useTheme'
 import { CommandPalette } from './CommandPalette'
+import { ConnectionsTicker } from './ConnectionsTicker'
 import { Icon, Tooltip, Menu, Breadcrumbs } from './ui'
 
 type NavItem = { to: string; label: string; icon: any; admin?: boolean; soon?: boolean }
@@ -165,6 +166,9 @@ export function Shell({ children, subnav }: { children: React.ReactNode; subnav?
 
       {/* ============ Main column ============ */}
       <div className="shell-main">
+        {/* Connections ticker (admin-managed rotating links) */}
+        <ConnectionsTicker />
+
         {/* Top bar */}
         <header className="topbar">
           <button className="nav-icon-btn topbar-burger" onClick={() => setDrawer(true)} aria-label="Open menu">
