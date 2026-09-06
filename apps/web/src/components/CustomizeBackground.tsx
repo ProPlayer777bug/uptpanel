@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { api, uploadRaw } from '../api/client'
-import { Icon, Spinner, toast } from './ui'
+import { Icon, Spinner, Switch, toast } from './ui'
 import type { PanelBgConfig } from './PanelBackground'
 
 const MAX_IMAGE = 15 * 1024 * 1024
@@ -34,6 +34,8 @@ export function CustomizeBackground() {
   const [url, setUrl] = useState('')
   const [durationSec, setDurationSec] = useState(5)
   const [screen, setScreen] = useState<'pc' | 'mobile' | 'both'>('both')
+  const [slideEnabled, setSlideEnabled] = useState(false)
+  const [slideMinutes, setSlideMinutes] = useState(10)
   const [banner, setBanner] = useState('')
   const [pendingFile, setPendingFile] = useState<File | null>(null)
   const [objUrl, setObjUrl] = useState('')
@@ -43,11 +45,14 @@ export function CustomizeBackground() {
   const load = () => {
     api.get('/settings/background').then((d) => {
       const bg = (d.background || null) as PanelBgConfig | null
+      const ss = (d.slideshow || {}) as { enabled?: boolean; intervalSec?: number }
       setCfg(bg)
       setMode(bg?.enabled ? bg.kind : 'off')
       setUrl(bg?.url || '')
       setDurationSec(bg?.durationSec || 5)
       setScreen((bg?.screen as 'pc' | 'mobile' | 'both') || 'both')
+      setSlideEnabled(!!ss.enabled)
+      setSlideMinutes(Math.max(1, Math.min(1440, Math.round(Number(ss.intervalSec ?? 600) / 60) || 10)))
     }).catch((e: any) => toast.err(e?.message))
       .finally(() => setLoaded(true))
   }
@@ -96,6 +101,7 @@ export function CustomizeBackground() {
   const persist = async (enabled: boolean, kind: 'wallpaper' | 'live', finalUrl: string) => {
     const res = await api.put('/settings/background', {
       background: { enabled, kind, url: finalUrl, durationSec, screen },
+      slideshow: { enabled: slideEnabled, intervalSec: Math.max(60, slideMinutes * 60) },
     })
     setCfg(res.background as PanelBgConfig)
     window.dispatchEvent(new Event('uh-bg-changed'))
@@ -161,12 +167,14 @@ export function CustomizeBackground() {
     setLoading(true)
     setBanner('')
     try {
-      await api.put('/settings/background', { background: { enabled: false, kind: 'wallpaper', url: '', durationSec: 5, screen: 'both' } })
+      await api.put('/settings/background', { background: { enabled: false, kind: 'wallpaper', url: '', durationSec: 5, screen: 'both' }, slideshow: { enabled: false, intervalSec: 600 } })
       setCfg(null)
       setMode('off')
       setUrl('')
       setDurationSec(5)
       setScreen('both')
+      setSlideEnabled(false)
+      setSlideMinutes(10)
       dropFile()
       toast.ok('Restored the default panel background')
       window.dispatchEvent(new Event('uh-bg-changed'))
@@ -231,6 +239,22 @@ export function CustomizeBackground() {
               <button className={`btn ${screen === 'pc' ? 'subtle' : 'ghost'}`} onClick={() => setScreen('pc')}>PC only</button>
               <button className={`btn ${screen === 'mobile' ? 'subtle' : 'ghost'}`} onClick={() => setScreen('mobile')}>Mobile only</button>
               <span className="xs text-3">Which devices see this background.</span>
+            </div>
+
+            <div className="flex mt-2" style={{ gap: 12, alignItems: 'center', flexWrap: 'wrap' }}>
+              <Switch checked={slideEnabled} onChange={setSlideEnabled} label="Slideshow" />
+              {slideEnabled && (
+                <>
+                  <label className="xs text-2" htmlFor="uh-slide-min">change every</label>
+                  <input id="uh-slide-min" className="input" type="number" min={1} max={1440} value={slideMinutes}
+                    onChange={(e) => setSlideMinutes(Math.max(1, Math.min(1440, Math.round(Number(e.target.value) || 10))))}
+                    style={{ width: 74 }} />
+                  <span className="xs text-2">minute{slideMinutes === 1 ? '' : 's'}</span>
+                  <div style={{ flex: 1 }} />
+                  <span className="xs text-3">Auto-rotate the whole panel through your stored library.</span>
+                </>
+              )}
+              {!slideEnabled && <span className="xs text-3">Rotate through your stored wallpapers + live wallpapers automatically.</span>}
             </div>
 
             <div className="flex mt-2" style={{ gap: 10, alignItems: 'center', flexWrap: 'wrap' }}>

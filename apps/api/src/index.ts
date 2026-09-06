@@ -3478,10 +3478,22 @@ function maskApiKey(k: string): string {
 // Panel background — admins set a wallpaper or a short (<=10s) live wallpaper
 // for the whole panel. Public GET so the login screen renders it too; only
 // admins can change it. Media is stored inline (data: URL) or as an external
-// URL provided by the admin.
+// URL provided by the admin. slideshow auto-rotates the stored library on the
+// client (wallpapers + live wallpapers), intervalSec is the seconds between
+// slides (default 10 minutes).
 // ---------------------------------------------------------------------------
+const clampSlideshowInterval = (v: unknown) => {
+  const n = Number(v)
+  return Math.max(60, Math.min(86400, Number.isFinite(n) && n > 0 ? Math.round(n) : 600))
+}
 app.get('/api/settings/background', async (req, reply) => {
-  return { ok: true, background: store.db.settings?.background || null }
+  const s = store.db.settings
+  const ss = (s?.slideshow || {}) as any
+  return {
+    ok: true,
+    background: s?.background || null,
+    slideshow: { enabled: !!ss.enabled, intervalSec: clampSlideshowInterval(ss.intervalSec) },
+  }
 })
 
 // Universal panel transparency (0-100%). Independent of the background — it
@@ -3542,12 +3554,18 @@ app.put('/api/settings/background', { bodyLimit: 450 * 1024 * 1024 }, async (req
   const durationSec = Math.max(1, Math.min(60, Math.round(Number(bg.durationSec) || 5)))
   // Apply target: pc / mobile / both (rendered via CSS media queries).
   const screen = ['pc', 'mobile', 'both'].includes(bg.screen) ? bg.screen : 'both'
+  // Slideshow rotation of the stored media library (admin toggles it).
+  const slideshow = ((req.body || {}) as any).slideshow || {}
   store.db.settings = store.db.settings || {}
   store.db.settings.background = { enabled, kind, url: url || '', durationSec, screen, updatedAt: Date.now(), updatedBy: user.email }
+  store.db.settings.slideshow = {
+    enabled: !!slideshow.enabled,
+    intervalSec: clampSlideshowInterval(Number(slideshow.intervalSec) || 600),
+  }
   store.persist()
   activity(user, 'server', 'info', 'Updated panel background', { kind })
-  audit(store, user.name, 'EDIT_CONFIG', `panel background (${kind}, ${durationSec}s, ${screen})`)
-  return { ok: true, background: store.db.settings.background }
+  audit(store, user.name, 'EDIT_CONFIG', `panel background (${kind}, ${durationSec}s, ${screen}${store.db.settings.slideshow.enabled ? ', slideshow' : ''})`)
+  return { ok: true, background: store.db.settings.background, slideshow: store.db.settings.slideshow }
 })
 
 // Stream an uploaded background media file to disk (raw bytes — no base64), so
@@ -3592,11 +3610,10 @@ app.get('/api/settings/background/media/:name', async (req, reply) => {
 })
 
 // Stored background media library — every uploaded wallpaper/live wallpaper is
-// kept so admins can re-apply any of them without re-uploading.
+// kept so admins can re-apply any of them without re-uploading. Public so the
+// slideshow can rotate for every user (incl. the login screen); files are
+// random-name and already publicly served. Deletion stays admin-only.
 app.get('/api/settings/background/media', async (req, reply) => {
-  const user = me(req)
-  if (!user) return reply.code(401).send({ ok: false, error: 'UNAUTHENTICATED' })
-  if (!can(user, 'admin')) return reply.code(403).send({ ok: false, error: 'FORBIDDEN' })
   let files: { name: string; url: string; kind: 'wallpaper' | 'live'; size: number; addedAt: number }[] = []
   try {
     files = readdirSync(BG_MEDIA_DIR)
