@@ -3516,6 +3516,8 @@ app.put('/api/settings/background', { bodyLimit: 450 * 1024 * 1024 }, async (req
   const durationSec = Math.max(1, Math.min(60, Math.round(Number(bg.durationSec) || 5)))
   // Apply target: pc / mobile / both (rendered via CSS media queries).
   const screen = ['pc', 'mobile', 'both'].includes(bg.screen) ? bg.screen : 'both'
+  // Panel transparency %: 100 = fully see-through (current default), 0 = opaque.
+  const panelT = bg.panelT == null ? 100 : Math.max(0, Math.min(100, Math.round(Number(bg.panelT))))
   // Best-effort cleanup of a previously-uploaded media file replaced by this save.
   const prev = store.db.settings?.background?.url
   if (prev && prev !== url && /^\/api\/settings\/background\/media\//.test(prev)) {
@@ -3523,7 +3525,7 @@ app.put('/api/settings/background', { bodyLimit: 450 * 1024 * 1024 }, async (req
     if (BG_MEDIA_NAME_RE.test(oldName)) { try { unlinkSync(join(BG_MEDIA_DIR, oldName)) } catch { /* best-effort */ } }
   }
   store.db.settings = store.db.settings || {}
-  store.db.settings.background = { enabled, kind, url: url || '', durationSec, screen, updatedAt: Date.now(), updatedBy: user.email }
+  store.db.settings.background = { enabled, kind, url: url || '', durationSec, screen, panelT, updatedAt: Date.now(), updatedBy: user.email }
   store.persist()
   activity(user, 'server', 'info', 'Updated panel background', { kind })
   audit(store, user.name, 'EDIT_CONFIG', `panel background (${kind}, ${durationSec}s, ${screen})`)

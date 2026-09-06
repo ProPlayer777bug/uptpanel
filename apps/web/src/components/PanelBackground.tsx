@@ -7,6 +7,7 @@ export interface PanelBgConfig {
   url: string
   durationSec: number
   screen?: 'pc' | 'mobile' | 'both'
+  panelT?: number
 }
 
 // Global panel background layer. Fetches the admin-configured background (which
@@ -35,6 +36,13 @@ export function PanelBackground() {
 
   useEffect(() => {
     document.documentElement.classList.toggle('uh-bg', !!bg?.enabled)
+  }, [bg])
+
+  useEffect(() => {
+    // Panel transparency 0-100 (100 = fully see-through). Drives color-mix()
+    // alpha for .shell/.sidebar/.card in app.css via --uh-panel-t (0..1).
+    const t = Math.max(0, Math.min(100, Number(bg?.panelT ?? 100) || 100)) / 100
+    document.documentElement.style.setProperty('--uh-panel-t', String(t))
   }, [bg])
 
   if (!bg?.enabled || !bg.url) return null

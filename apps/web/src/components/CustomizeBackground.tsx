@@ -25,6 +25,7 @@ export function CustomizeBackground() {
   const [url, setUrl] = useState('')
   const [durationSec, setDurationSec] = useState(5)
   const [screen, setScreen] = useState<'pc' | 'mobile' | 'both'>('both')
+  const [panelT, setPanelT] = useState(100)
   const [banner, setBanner] = useState('')
   const [pendingFile, setPendingFile] = useState<File | null>(null)
   const [objUrl, setObjUrl] = useState('')
@@ -39,6 +40,8 @@ export function CustomizeBackground() {
       setUrl(bg?.url || '')
       setDurationSec(bg?.durationSec || 5)
       setScreen((bg?.screen as 'pc' | 'mobile' | 'both') || 'both')
+      setPanelT(Number(bg?.panelT ?? 100))
+      document.documentElement.style.setProperty('--uh-panel-t', String(Number(bg?.panelT ?? 100) / 100))
     }).catch((e: any) => toast.err(e?.message))
       .finally(() => setLoaded(true))
   }
@@ -95,7 +98,7 @@ export function CustomizeBackground() {
         dropFile()
       }
       const res = await api.put('/settings/background', {
-        background: { enabled, kind: mode || 'wallpaper', url: finalUrl, durationSec, screen },
+        background: { enabled, kind: mode || 'wallpaper', url: finalUrl, durationSec, screen, panelT },
       })
       setCfg(res.background as PanelBgConfig)
       toast.ok(enabled ? 'Background applied to the whole panel' : 'Background removed')
@@ -116,6 +119,8 @@ export function CustomizeBackground() {
       setUrl('')
       setDurationSec(5)
       setScreen('both')
+      setPanelT(100)
+      document.documentElement.style.setProperty('--uh-panel-t', '1')
       dropFile()
       toast.ok('Restored the default panel background')
       window.dispatchEvent(new Event('uh-bg-changed'))
@@ -180,6 +185,13 @@ export function CustomizeBackground() {
               <button className={`btn ${screen === 'pc' ? 'subtle' : 'ghost'}`} onClick={() => setScreen('pc')}>PC only</button>
               <button className={`btn ${screen === 'mobile' ? 'subtle' : 'ghost'}`} onClick={() => setScreen('mobile')}>Mobile only</button>
               <span className="xs text-3">Which devices see this background.</span>
+            </div>
+
+            <div className="field mt-2" style={{ maxWidth: 340 }}>
+              <label>Panel transparency: {panelT}%</label>
+              <input type="range" min={0} max={100} value={panelT}
+                onChange={(e) => { const v = Number(e.target.value); setPanelT(v); document.documentElement.style.setProperty('--uh-panel-t', String(v / 100)) }} />
+              <span className="xs text-3">How see-through the panel is over the background. 100% = wallpaper shows through fully, 0% = solid panel surfaces.</span>
             </div>
 
             <div className="flex mt-2" style={{ gap: 10, alignItems: 'center', flexWrap: 'wrap' }}>
