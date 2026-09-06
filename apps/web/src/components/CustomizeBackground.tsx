@@ -15,7 +15,7 @@ async function fileToDataUrl(file: File): Promise<string> {
   })
 }
 
-// Checks media duration (used for live wallpaper: clips must be <= 10s).
+// Checks media duration (used for live wallpaper: clips must be <= 60s).
 function readVideoDuration(url: string): Promise<number> {
   return new Promise((resolve, reject) => {
     const v = document.createElement('video')
@@ -67,8 +67,8 @@ export function CustomizeBackground() {
       try {
         const dur = await readVideoDuration(dataUrl)
         if (!Number.isFinite(dur) || dur <= 0) { setBanner('Could not read the video.'); return }
-        if (dur > 10.5) {
-          setBanner(`That video is ${dur.toFixed(1)}s long. Live wallpaper clips must be 10 seconds or shorter.`)
+        if (dur > 60.5) {
+          setBanner(`That video is ${dur.toFixed(1)}s long. Live wallpaper clips must be 60 seconds or shorter.`)
           return
         }
       } catch { setBanner('Could not read the video — try a shorter MP4/WEBM file.'); return }
@@ -148,12 +148,12 @@ export function CustomizeBackground() {
               </div>
               {mode === 'live' && (
                 <div className="field">
-                  <label>Duration (1–10s)</label>
+                  <label>Duration (1–60s)</label>
                   <div className="flex" style={{ gap: 8, alignItems: 'center' }}>
-                    <input className="input" type="number" min={1} max={10} value={durationSec} onChange={(e) => setDurationSec(Math.max(1, Math.min(10, Math.round(Number(e.target.value) || 5))))} />
+                    <input className="input" type="number" min={1} max={60} value={durationSec} onChange={(e) => setDurationSec(Math.max(1, Math.min(60, Math.round(Number(e.target.value) || 5))))} />
                     <span className="xs">seconds</span>
                   </div>
-                  <span className="xs text-3">Live clips are capped at 10 seconds.</span>
+                  <span className="xs text-3">Live clips are capped at 60 seconds.</span>
                 </div>
               )}
             </div>
@@ -171,7 +171,7 @@ export function CustomizeBackground() {
                 <Icon name="upload" size={13} /> Upload {mode === 'wallpaper' ? 'image' : 'video'} file
               </button>
               <input ref={fileRef} type="file" accept={mode === 'wallpaper' ? 'image/*' : 'video/*'} style={{ display: 'none' }} onChange={pickFile} />
-              <span className="xs text-3">{mode === 'wallpaper' ? 'PNG/JPG/GIF/WEBP, 15 MB max.' : 'MP4/WEBM, 10s max, 300 MB max.'}</span>
+              <span className="xs text-3">{mode === 'wallpaper' ? 'PNG/JPG/GIF/WEBP, 15 MB max.' : 'MP4/WEBM, 60s max, 300 MB max.'}</span>
             </div>
 
             {banner && <div className="xs mt-2" style={{ color: 'var(--danger)' }}>{banner}</div>}

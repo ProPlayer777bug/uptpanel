@@ -3492,7 +3492,7 @@ app.put('/api/settings/background', { bodyLimit: 450 * 1024 * 1024 }, async (req
       }
     }
   }
-  const durationSec = Math.max(1, Math.min(10, Math.round(Number(bg.durationSec) || 5)))
+  const durationSec = Math.max(1, Math.min(60, Math.round(Number(bg.durationSec) || 5)))
   // Apply target: pc / mobile / both (rendered via CSS media queries).
   const screen = ['pc', 'mobile', 'both'].includes(bg.screen) ? bg.screen : 'both'
   store.db.settings = store.db.settings || {}
