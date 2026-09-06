@@ -41,7 +41,7 @@ export const PALETTES: Palette[] = [
   { id: 'cyber-end', name: 'Cyber End', primary: '#00FF9C', secondary: '#00D9FF', accent: '#B000FF', background: '#030509', surface: '#080D14', card: '#0D141D', text: '#F5FFFC', muted: '#82949A', success: '#00FF9C', danger: '#FF3864' },
 ]
 
-const DEFAULT_PALETTE = 'ender-purple'
+const DEFAULT_PALETTE = 'sakura'
 
 export type PaletteId = string
 
@@ -50,12 +50,12 @@ export type PaletteId = string
 // effect in dark/system-resolved-dark mode (the palettes are dark themes).
 export function usePalette() {
   const [palette, setPalette] = useState<PaletteId>(
-    () => (localStorage.getItem('uh_palette') as PaletteId) || DEFAULT_PALETTE
+    () => (localStorage.getItem('uh_palette2') as PaletteId) || DEFAULT_PALETTE
   )
 
   useEffect(() => {
     document.documentElement.dataset.palette = palette
-    localStorage.setItem('uh_palette', palette)
+    localStorage.setItem('uh_palette2', palette)
   }, [palette])
 
   return { palette, setPalette }

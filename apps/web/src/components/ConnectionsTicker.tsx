@@ -14,11 +14,11 @@ export function ConnectionsTicker() {
   const { canAdmin } = useApp()
   const [items, setItems] = useState<PanelConnection[] | null>(null)
   const [idx, setIdx] = useState(0)
-  const [panelT, setPanelT] = useState(0)
+  const [panelT, setPanelT] = useState(71)
   const savedRef = useRef<number | null>(null)
 
   const loadPanelT = () => {
-    api.get('/settings/panel').then((d: any) => setPanelT(Math.round(Number(d?.panelT ?? 0)))).catch(() => {})
+    api.get('/settings/panel').then((d: any) => setPanelT(Math.round(Number(d?.panelT ?? 71)))).catch(() => {})
   }
 
   useEffect(() => {

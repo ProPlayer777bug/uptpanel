@@ -3492,7 +3492,7 @@ const panelTStored = () => {
   if (typeof s?.panelT === 'number') return s.panelT
   // one-time migration: was previously stored inside settings.background
   if (typeof s?.background?.panelT === 'number') return s.background.panelT
-  return 0
+  return 71
 }
 app.get('/api/settings/panel', async (req, reply) => {
   return { ok: true, panelT: Math.max(0, Math.min(100, Math.round(panelTStored()))) }

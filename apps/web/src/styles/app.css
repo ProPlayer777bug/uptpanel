@@ -44,7 +44,7 @@
   /* Universal panel transparency (0-100%): glass aliases of the surface tokens
      so the WHOLE panel — cards, sidebar, inputs, tables, ticker — blends with
      whatever is behind it. 0 = opaque (default), 100 = fully see-through. */
-  --uh-panel-t: 0;
+  --uh-panel-t: 0.71;
   --uh-surface: color-mix(in srgb, var(--surface) calc((1 - var(--uh-panel-t)) * 100%), transparent);
   --uh-surface-2: color-mix(in srgb, var(--surface-2) calc((1 - var(--uh-panel-t)) * 100%), transparent);
   --uh-surface-3: color-mix(in srgb, var(--surface-3) calc((1 - var(--uh-panel-t)) * 100%), transparent);
