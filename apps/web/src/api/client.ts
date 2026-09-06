@@ -79,6 +79,27 @@ export async function uploadForm(path: string, form: FormData): Promise<any> {
   return res.json().catch(() => ({}))
 }
 
+// Upload a raw file body (no multipart) — used for background media so the file
+// bytes stream to the server un-inflated (a base64 data-URL would quadruple
+// memory). XHR gives upload progress; the browser sets the true content-type.
+export function uploadRaw(path: string, file: File, onProgress?: (pct: number) => void): Promise<any> {
+  const token = getToken()
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest()
+    xhr.open('POST', `/api${path}`)
+    if (token) xhr.setRequestHeader('authorization', `Bearer ${token}`)
+    xhr.upload.onprogress = (e) => { if (onProgress && e.lengthComputable) onProgress(Math.round((e.loaded / e.total) * 100)) }
+    xhr.onload = () => {
+      let data: any = {}
+      try { data = JSON.parse(xhr.responseText) } catch { /* non-JSON error body */ }
+      if (xhr.status >= 200 && xhr.status < 300) resolve(data)
+      else { const err: any = new Error(data.error || `HTTP ${xhr.status}`); err.status = xhr.status; reject(err) }
+    }
+    xhr.onerror = () => reject(new Error('Network error during upload'))
+    xhr.send(file)
+  })
+}
+
 export interface Err extends Error {
   data?: { code?: string; error?: string }
   status?: number

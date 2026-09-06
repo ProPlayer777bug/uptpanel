@@ -12,6 +12,9 @@ import { Store } from './store/store.js'
 import { seed } from './sim/seed.js'
 import { WsHub } from './ws/hub.js'
 import { randomBytes, timingSafeEqual } from 'node:crypto'
+import { mkdirSync, createWriteStream, createReadStream, existsSync, unlinkSync, statSync } from 'node:fs'
+import { join, extname } from 'node:path'
+import { pipeline } from 'node:stream/promises'
 import { nanoid } from 'nanoid'
 import { requireAuth, createSession, verifyPw, hashPw, can, audit, isGlobalAdmin, serverAccess, generateKeyToken } from './modules/auth.js'
 import { issueOtp, verifyOtp, sendOtp, oauthAuthorizeUrl, oauthCallback, oauthCallbackUrl, appBaseUrl, providerFlags, getAuthSettings, setAuthSettings, publicAuthSettings, validateOAuthState } from './modules/providers.js'
@@ -829,6 +832,18 @@ function validPanelPath(p: any): boolean {
 
 const MAX_UPLOAD_BYTES = 200 * 1024 * 1024
 const MAX_WRITE_BYTES = 1024 * 1024
+
+// Background media is stored as real files on disk (never base64 in the DB):
+// a ~300MB video base64-encodes to ~400MB and blows the browser's memory out
+// ("Aw, Snap!"), so uploads stream raw bytes instead and are served back as
+// ordinary media URLs.
+const MAX_BG_UPLOAD_BYTES = 320 * 1024 * 1024
+const BG_MEDIA_DIR = join(process.cwd(), '.uh-data', 'background')
+const BG_MEDIA_EXT: Record<string, string> = {
+  '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.gif': 'image/gif', '.webp': 'image/webp',
+  '.mp4': 'video/mp4', '.webm': 'video/webm', '.mov': 'video/quicktime',
+}
+const BG_MEDIA_NAME_RE = /^[a-z0-9-]+\.(png|jpe?g|gif|webp|mp4|webm|mov)$/i
 
 function buildAgentUrl(node: any): string {
   if (node.agentUrl) {
@@ -3481,7 +3496,8 @@ app.put('/api/settings/background', { bodyLimit: 450 * 1024 * 1024 }, async (req
     if (!url) return reply.code(400).send({ ok: false, error: 'NO_URL' })
     const isData = /^data:(image\/|video\/)/i.test(url)
     const isHttp = /^https?:\/\//i.test(url)
-    if (!isData && !isHttp) return reply.code(400).send({ ok: false, error: 'INVALID_URL' })
+    const isLocalMedia = /^\/api\/settings\/background\/media\/[a-z0-9-]+\.(png|jpe?g|gif|webp|mp4|webm|mov)$/i.test(url)
+    if (!isData && !isHttp && !isLocalMedia) return reply.code(400).send({ ok: false, error: 'INVALID_URL' })
     if (isData) {
       const mime = (url.split(';')[0] || '').split(':')[1] || ''
       if (kind === 'wallpaper' && !/^image\//.test(mime)) {
@@ -3491,16 +3507,68 @@ app.put('/api/settings/background', { bodyLimit: 450 * 1024 * 1024 }, async (req
         return reply.code(400).send({ ok: false, error: 'LIVE_MUST_BE_VIDEO' })
       }
     }
+    if (isLocalMedia) {
+      const isVideoLocal = /\.(mp4|webm|mov)$/.test(url)
+      if (kind === 'wallpaper' && isVideoLocal) return reply.code(400).send({ ok: false, error: 'WALLPAPER_MUST_BE_IMAGE' })
+      if (kind === 'live' && !isVideoLocal) return reply.code(400).send({ ok: false, error: 'LIVE_MUST_BE_VIDEO' })
+    }
   }
   const durationSec = Math.max(1, Math.min(60, Math.round(Number(bg.durationSec) || 5)))
   // Apply target: pc / mobile / both (rendered via CSS media queries).
   const screen = ['pc', 'mobile', 'both'].includes(bg.screen) ? bg.screen : 'both'
+  // Best-effort cleanup of a previously-uploaded media file replaced by this save.
+  const prev = store.db.settings?.background?.url
+  if (prev && prev !== url && /^\/api\/settings\/background\/media\//.test(prev)) {
+    const oldName = prev.split('/').pop() || ''
+    if (BG_MEDIA_NAME_RE.test(oldName)) { try { unlinkSync(join(BG_MEDIA_DIR, oldName)) } catch { /* best-effort */ } }
+  }
   store.db.settings = store.db.settings || {}
   store.db.settings.background = { enabled, kind, url: url || '', durationSec, screen, updatedAt: Date.now(), updatedBy: user.email }
   store.persist()
   activity(user, 'server', 'info', 'Updated panel background', { kind })
   audit(store, user.name, 'EDIT_CONFIG', `panel background (${kind}, ${durationSec}s, ${screen})`)
   return { ok: true, background: store.db.settings.background }
+})
+
+// Stream an uploaded background media file to disk (raw bytes — no base64), so
+// a large video upload never inflates in the browser or the network layer.
+const BG_UPLOAD_TYPES = ['image/png', 'image/jpeg', 'image/gif', 'image/webp', 'video/mp4', 'video/webm', 'video/quicktime']
+app.addContentTypeParser(BG_UPLOAD_TYPES, (_req: any, payload: any, done: any) => {
+  done(null, payload)
+})
+app.post('/api/settings/background/upload', async (req, reply) => {
+  const user = me(req)
+  if (!user) return reply.code(401).send({ ok: false, error: 'UNAUTHENTICATED' })
+  if (!can(user, 'admin')) return reply.code(403).send({ ok: false, error: 'FORBIDDEN' })
+  const ct = String(req.headers['content-type'] || 'application/octet-stream').toLowerCase()
+  const ext = Object.entries(BG_MEDIA_EXT).find(([, mime]) => ct.startsWith(mime))?.[0] || (/^image\//.test(ct) ? '.png' : /^video\//.test(ct) ? '.mp4' : null)
+  if (!ext) return reply.code(415).send({ ok: false, error: 'UNSUPPORTED_MEDIA_TYPE' })
+  const len = Number(req.headers['content-length'] || 0)
+  if (len > MAX_BG_UPLOAD_BYTES) return reply.code(413).send({ ok: false, error: 'UPLOAD_TOO_LARGE' })
+  const name = `bg-${nanoid(14)}${ext}`
+  mkdirSync(BG_MEDIA_DIR, { recursive: true })
+  const target = join(BG_MEDIA_DIR, name)
+  try {
+    await pipeline(req.body as NodeJS.ReadableStream, createWriteStream(target))
+  } catch (e: any) {
+    try { unlinkSync(target) } catch { /* best-effort */ }
+    return reply.code(500).send({ ok: false, error: 'UPLOAD_FAILED' })
+  }
+  const size = existsSync(target) ? statSync(target).size : 0
+  audit(store, user.name, 'UPLOAD_MEDIA', `background:${name} (${size} bytes)`)
+  return { ok: true, url: `/api/settings/background/media/${name}`, size }
+})
+
+// Public media delivery for stored background files (login screen renders it
+// too). Names are cryptographically random, so immutable caching is safe.
+app.get('/api/settings/background/media/:name', async (req, reply) => {
+  const { name } = req.params as any
+  if (!BG_MEDIA_NAME_RE.test(String(name || ''))) return reply.code(404).send({ ok: false, error: 'NOT_FOUND' })
+  const file = join(BG_MEDIA_DIR, name)
+  if (!existsSync(file)) return reply.code(404).send({ ok: false, error: 'NOT_FOUND' })
+  const mime = BG_MEDIA_EXT[extname(name).toLowerCase()] || 'application/octet-stream'
+  reply.header('Content-Type', mime).header('Cache-Control', 'public, max-age=31536000, immutable')
+  return reply.send(createReadStream(file))
 })
 
 // ---------------------------------------------------------------------------

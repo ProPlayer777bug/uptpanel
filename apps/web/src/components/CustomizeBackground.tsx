@@ -1,19 +1,10 @@
 import { useEffect, useRef, useState } from 'react'
-import { api } from '../api/client'
+import { api, uploadRaw } from '../api/client'
 import { Icon, Spinner, toast } from './ui'
 import type { PanelBgConfig } from './PanelBackground'
 
 const MAX_IMAGE = 15 * 1024 * 1024
 const MAX_VIDEO = 300 * 1024 * 1024
-
-async function fileToDataUrl(file: File): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const r = new FileReader()
-    r.onload = () => resolve(String(r.result || ''))
-    r.onerror = () => reject(new Error('Failed to read file'))
-    r.readAsDataURL(file)
-  })
-}
 
 // Checks media duration (used for live wallpaper: clips must be <= 60s).
 function readVideoDuration(url: string): Promise<number> {
@@ -35,6 +26,9 @@ export function CustomizeBackground() {
   const [durationSec, setDurationSec] = useState(5)
   const [screen, setScreen] = useState<'pc' | 'mobile' | 'both'>('both')
   const [banner, setBanner] = useState('')
+  const [pendingFile, setPendingFile] = useState<File | null>(null)
+  const [objUrl, setObjUrl] = useState('')
+  const [progress, setProgress] = useState(0)
   const fileRef = useRef<HTMLInputElement>(null)
 
   const load = () => {
@@ -50,6 +44,11 @@ export function CustomizeBackground() {
   }
   useEffect(() => { load() }, [])
 
+  const dropFile = () => {
+    setPendingFile(null)
+    if (objUrl) { URL.revokeObjectURL(objUrl); setObjUrl('') }
+  }
+
   const pickFile = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0]
     e.target.value = ''
@@ -59,31 +58,44 @@ export function CustomizeBackground() {
     if (!isVideo && !file.type.startsWith('image/')) { setBanner('Please choose an image file (PNG, JPG, GIF, WEBP).'); return }
     if (isVideo && !file.type.startsWith('video/')) { setBanner('Please choose a video file (MP4, WEBM, MOV).'); return }
     if (file.size > (isVideo ? MAX_VIDEO : MAX_IMAGE)) {
-      setBanner(`This file is too large (${(file.size / 1048576).toFixed(1)} MB). ${isVideo ? '28' : '15'} MB max.`)
+      setBanner(`This file is too large (${(file.size / 1048576).toFixed(1)} MB). ${isVideo ? '300' : '15'} MB max.`)
       return
     }
-    const dataUrl = await fileToDataUrl(file)
+    const preview = URL.createObjectURL(file)
     if (isVideo) {
       try {
-        const dur = await readVideoDuration(dataUrl)
-        if (!Number.isFinite(dur) || dur <= 0) { setBanner('Could not read the video.'); return }
+        const dur = await readVideoDuration(preview)
+        if (!Number.isFinite(dur) || dur <= 0) { URL.revokeObjectURL(preview); setBanner('Could not read the video.'); return }
         if (dur > 60.5) {
+          URL.revokeObjectURL(preview)
           setBanner(`That video is ${dur.toFixed(1)}s long. Live wallpaper clips must be 60 seconds or shorter.`)
           return
         }
-      } catch { setBanner('Could not read the video — try a shorter MP4/WEBM file.'); return }
+      } catch { URL.revokeObjectURL(preview); setBanner('Could not read the video — try a shorter MP4/WEBM file.'); return }
     }
-    setUrl(dataUrl)
-    setBanner('File loaded — click Save to apply.')
+    if (pendingFile) dropFile()
+    setPendingFile(file)
+    setObjUrl(preview)
+    setBanner('File ready — click Save to upload & apply.')
   }
 
   const save = async () => {
     setLoading(true)
     setBanner('')
+    setProgress(0)
     try {
       const enabled = mode !== 'off'
+      let finalUrl = url.trim()
+      // Upload the picked file for real (raw bytes — never base64, so a 300MB
+      // clip can't OOM the browser), then persist the returned media URL.
+      if (enabled && pendingFile) {
+        const up = await uploadRaw('/settings/background/upload', pendingFile, setProgress)
+        finalUrl = up.url || finalUrl
+        setUrl(finalUrl)
+        dropFile()
+      }
       const res = await api.put('/settings/background', {
-        background: { enabled, kind: mode || 'wallpaper', url: url.trim(), durationSec, screen },
+        background: { enabled, kind: mode || 'wallpaper', url: finalUrl, durationSec, screen },
       })
       setCfg(res.background as PanelBgConfig)
       toast.ok(enabled ? 'Background applied to the whole panel' : 'Background removed')
@@ -104,6 +116,7 @@ export function CustomizeBackground() {
       setUrl('')
       setDurationSec(5)
       setScreen('both')
+      dropFile()
       toast.ok('Restored the default panel background')
       window.dispatchEvent(new Event('uh-bg-changed'))
     } catch (e: any) {
@@ -114,7 +127,7 @@ export function CustomizeBackground() {
 
   if (!loaded) return <div className="center" style={{ padding: 18 }}><Spinner size={18} /></div>
 
-  const previewUrl = url
+  const previewUrl = objUrl || (cfg?.url ? url : '')
   return (
     <div className="card">
       <div className="card-h">
@@ -126,7 +139,10 @@ export function CustomizeBackground() {
             <Icon name="restart" size={13} /> Restore default
           </button>
         )}
-        <button className="btn sm primary" onClick={save} disabled={loading}><Icon name="check" size={13} /> Save</button>
+        <button className="btn sm primary" onClick={save} disabled={loading}>
+          <Icon name="check" size={13} />
+          {loading && pendingFile && progress < 100 ? `Uploading… ${progress}%` : pendingFile ? 'Upload & save' : 'Save'}
+        </button>
       </div>
       <div className="card-b">
         <div className="flex gap-2 mb-3" style={{ flexWrap: 'wrap' }}>
@@ -166,13 +182,27 @@ export function CustomizeBackground() {
               <span className="xs text-3">Which devices see this background.</span>
             </div>
 
-            <div className="flex mt-2" style={{ gap: 10, alignItems: 'center' }}>
+            <div className="flex mt-2" style={{ gap: 10, alignItems: 'center', flexWrap: 'wrap' }}>
               <button className="btn sm ghost" onClick={() => fileRef.current?.click()}>
-                <Icon name="upload" size={13} /> Upload {mode === 'wallpaper' ? 'image' : 'video'} file
+                <Icon name="upload" size={13} /> {pendingFile ? 'Choose another file' : `Upload ${mode === 'wallpaper' ? 'image' : 'video'} file`}
               </button>
               <input ref={fileRef} type="file" accept={mode === 'wallpaper' ? 'image/*' : 'video/*'} style={{ display: 'none' }} onChange={pickFile} />
-              <span className="xs text-3">{mode === 'wallpaper' ? 'PNG/JPG/GIF/WEBP, 15 MB max.' : 'MP4/WEBM, 60s max, 300 MB max.'}</span>
+              {pendingFile ? (
+                <span className="xs text-2 nowrap flex" style={{ gap: 6, alignItems: 'center' }}>
+                  <Icon name="file" size={12} /> {pendingFile.name} ({(pendingFile.size / 1048576).toFixed(1)} MB)
+                  <button className="btn sm ghost icon" onClick={dropFile} title="Remove selected file"><Icon name="x" size={12} /></button>
+                </span>
+              ) : (
+                <span className="xs text-3">{mode === 'wallpaper' ? 'PNG/JPG/GIF/WEBP, 15 MB max.' : 'MP4/WEBM, 60s max, 300 MB max.'}</span>
+              )}
             </div>
+
+            {loading && progress > 0 && progress < 100 && (
+              <div className="mt-2">
+                <div className="bar" style={{ width: 240, maxWidth: '100%' }}><div className="bar-fill accent" style={{ width: `${progress}%` }} /></div>
+                <span className="xs text-3 mt-1">Uploading… {progress}%</span>
+              </div>
+            )}
 
             {banner && <div className="xs mt-2" style={{ color: 'var(--danger)' }}>{banner}</div>}
 
